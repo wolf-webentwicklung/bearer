@@ -108,3 +108,25 @@ def test_dockerfile_ships_hardening():
                    'GUARDDOG_TOP_PACKAGES_CACHE_LOCATION=/tmp/guarddog-cache',
                    'entrypoint.sh'):
         assert needle in df
+
+
+def test_entrypoint_seeds_guarddog_cache_without_importing_guarddog(tmp_path):
+    # Importing guarddog loads its typosquatting detectors, which crash while the cache is
+    # still empty - the seed must locate the bundled lists by path only.
+    import subprocess
+
+    src = (Path(__file__).resolve().parent.parent / 'entrypoint.sh').read_text()
+    code = [l for l in src.splitlines() if not l.lstrip().startswith('#')]
+    assert not any('import guarddog' in l for l in code)
+
+    res = tmp_path / 'venvs/guarddog/lib/python3.12/site-packages/guarddog/analyzer/metadata/resources'
+    res.mkdir(parents=True)
+    (res / 'top_pypi_packages.json').write_text('[]')
+    (res / 'top_go_packages.json').write_text('[]')
+    script = tmp_path / 'entrypoint.sh'
+    script.write_text(src.replace('/opt/venvs', str(tmp_path / 'venvs'))
+                         .replace('exec python /opt/unified-scan/http_wrapper.py', 'exit 0'))
+    cache = tmp_path / 'cache'
+    subprocess.run(['sh', str(script)], check=True,
+                   env={'PATH': '/usr/bin:/bin', 'GUARDDOG_TOP_PACKAGES_CACHE_LOCATION': str(cache)})
+    assert sorted(p.name for p in cache.iterdir()) == ['top_go_packages.json', 'top_pypi_packages.json']

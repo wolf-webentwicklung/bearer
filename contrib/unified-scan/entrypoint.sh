@@ -7,9 +7,13 @@
 set -e
 if [ -n "$GUARDDOG_TOP_PACKAGES_CACHE_LOCATION" ]; then
     mkdir -p "$GUARDDOG_TOP_PACKAGES_CACHE_LOCATION"
-    res="$(/opt/venvs/guarddog/bin/python -c 'import os, guarddog; print(os.path.join(os.path.dirname(guarddog.__file__), "analyzer", "metadata", "resources"))' 2>/dev/null || true)"
-    if [ -n "$res" ] && [ -d "$res" ]; then
-        cp -n "$res"/* "$GUARDDOG_TOP_PACKAGES_CACHE_LOCATION"/ 2>/dev/null || true
-    fi
+    # Locate the bundled lists by path, not via `import guarddog`: importing already loads the
+    # typosquatting detectors, which fail while the cache is still empty - the seed would then
+    # never happen and every later guarddog run crashes the same way.
+    for res in /opt/venvs/guarddog/lib/python3*/site-packages/guarddog/analyzer/metadata/resources; do
+        if [ -d "$res" ]; then
+            cp -n "$res"/* "$GUARDDOG_TOP_PACKAGES_CACHE_LOCATION"/ 2>/dev/null || true
+        fi
+    done
 fi
 exec python /opt/unified-scan/http_wrapper.py
