@@ -1,0 +1,278 @@
+{
+ "critical": [
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "pickle_cache_local.py",
+   "full_filename": "/src/pickle_cache_local.py",
+   "id": "python_lang_avoid_pickle",
+   "line_number": 9,
+   "source": {
+    "column": {
+     "end": 29,
+     "start": 9
+    },
+    "end": 9,
+    "start": 9
+   },
+   "title": "Usage of unsafe Pickle libraries"
+  },
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "pickle_cache_local.py",
+   "full_filename": "/src/pickle_cache_local.py",
+   "id": "python_lang_avoid_pickle",
+   "line_number": 16,
+   "source": {
+    "column": {
+     "end": 31,
+     "start": 16
+    },
+    "end": 16,
+    "start": 16
+   },
+   "title": "Usage of unsafe Pickle libraries"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "run_tool.py",
+   "full_filename": "/src/run_tool.py",
+   "id": "python_lang_os_command_injection",
+   "line_number": 6,
+   "source": {
+    "column": {
+     "end": 89,
+     "start": 5
+    },
+    "end": 6,
+    "start": 6
+   },
+   "title": "Unsanitized user input in OS command"
+  }
+ ],
+ "high": [
+  {
+   "cwe_ids": [
+    "73"
+   ],
+   "filename": "csv_tool.js",
+   "full_filename": "/src/csv_tool.js",
+   "id": "javascript_lang_non_literal_fs_filename",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 46,
+     "start": 17
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "config_loader.py",
+   "full_filename": "/src/config_loader.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 10,
+   "source": {
+    "column": {
+     "end": 38,
+     "start": 10
+    },
+    "end": 10,
+    "start": 10
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "copy_backup.py",
+   "full_filename": "/src/copy_backup.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 10,
+   "source": {
+    "column": {
+     "end": 36,
+     "start": 5
+    },
+    "end": 10,
+    "start": 10
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 35,
+     "start": 17
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 41,
+     "start": 9
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 9,
+   "source": {
+    "column": {
+     "end": 50,
+     "start": 9
+    },
+    "end": 9,
+    "start": 9
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 10,
+   "source": {
+    "column": {
+     "end": 24,
+     "start": 21
+    },
+    "end": 10,
+    "start": 10
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 11,
+   "source": {
+    "column": {
+     "end": 29,
+     "start": 26
+    },
+    "end": 11,
+    "start": 11
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "rename_files.py",
+   "full_filename": "/src/rename_files.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 15,
+   "source": {
+    "column": {
+     "end": 38,
+     "start": 10
+    },
+    "end": 15,
+    "start": 15
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "user_mail_list.py",
+   "full_filename": "/src/user_mail_list.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 9,
+   "source": {
+    "column": {
+     "end": 55,
+     "start": 10
+    },
+    "end": 9,
+    "start": 9
+   },
+   "title": "Unsanitized dynamic input in file path"
+  }
+ ],
+ "low": [
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "csv_tool.js",
+   "full_filename": "/src/csv_tool.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 17,
+   "source": {
+    "column": {
+     "end": 28,
+     "start": 1
+    },
+    "end": 17,
+    "start": 17
+   },
+   "title": "Leakage of information in logger message"
+  },
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "fetch_status.js",
+   "full_filename": "/src/fetch_status.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 27,
+     "start": 3
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Leakage of information in logger message"
+  }
+ ]
+}
