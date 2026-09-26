@@ -119,8 +119,8 @@ def test_relative_file(tmp_path, raw, expected):
 
 
 def test_relativize_recomputes_noise_flag(tmp_path):
-    # An absolute temp path containing e.g. /build/ must not mark real code as test/vendor code.
-    root = tmp_path / 'build' / 'src'
+    # An absolute temp path containing e.g. /tests/ must not mark real code as test code.
+    root = tmp_path / 'tests' / 'src'
     root.mkdir(parents=True)
     f = Finding(tool='bearer', severity='high', rule_id='r', title='t', file=str(root / 'app.py'))
     assert f.excluded_from_score

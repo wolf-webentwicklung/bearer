@@ -86,12 +86,23 @@ def annotate_report(report: dict, filename: str) -> dict:
     return report
 
 
+def scan_command(archive: Path, out_dir: Path) -> list[str]:
+    """Scans run at low CPU/IO priority so a long scan does not starve other services on the
+    same host (nice/ionice are inherited by the scanner child processes)."""
+    cmd = [sys.executable, str(SCRIPT), str(archive), "--out", str(out_dir)]
+    if shutil.which("ionice"):
+        cmd = ["ionice", "-c", "3"] + cmd
+    if shutil.which("nice"):
+        cmd = ["nice", "-n", "10"] + cmd
+    return cmd
+
+
 def run_scan(archive: Path, filename: str, job: Path, timeout: int = TIMEOUT_SECONDS) -> dict:
     """Runs unified_scan.py on the archive inside job/, returns the combined report."""
     out_dir = job / "report"
     env = {**os.environ, "TMPDIR": str(job)}
     proc = subprocess.Popen(
-        [sys.executable, str(SCRIPT), str(archive), "--out", str(out_dir)],
+        scan_command(archive, out_dir),
         cwd=str(job), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, start_new_session=True,
     )

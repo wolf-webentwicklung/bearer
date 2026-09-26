@@ -83,6 +83,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,17 +99,23 @@ from safe_extract import ArchiveRejected, safe_extract
 SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 SEVERITY_WEIGHT = {"critical": 40, "high": 20, "medium": 8, "low": 2, "info": 0}
 
-# Pfad-Fragmente, die auf Test-/Beispiel-/Vendor-Code hindeuten. Findings
-# darin fließen NICHT in den Kritikalitäts-Score ein (verzerren ihn sonst
-# nach oben, obwohl es kein Code ist der live läuft), bleiben aber sichtbar
-# im Mitarbeiter-Report, klar markiert.
+# Pfad-Fragmente, die auf Test-Code hindeuten. Findings darin fließen NICHT in
+# den Kritikalitäts-Score ein (verzerren ihn sonst nach oben, obwohl es kein
+# Code ist der live läuft), bleiben aber sichtbar im Mitarbeiter-Report, klar
+# markiert. Bewusst NUR echte Test-Pfade: build/, dist/, vendor/, examples/
+# o.ä. sind oft genau der Code, der ausgeliefert wird, und ein Ordnername ist
+# vom Uploader frei wählbar - er darf keine Funde abschalten.
 NOISE_PATH_PATTERNS = [
     "/test/", "/tests/", "/__tests__/", "/spec/", "/specs/",
     "/fixture/", "/fixtures/", "/testdata/", "/test-data/",
-    "/vendor/", "/node_modules/", "/.git/", "/dist/", "/build/",
-    "/example/", "/examples/", "/demo/", "/demos/", "/codefixes/",
-    "/.venv/", "/venv/", "/__pycache__/",
 ]
+_NOISE_FILE_PATTERN = re.compile(
+    r"(^test_.+\.py|.+_test\.py|.+_test\.go|.+\.(test|spec)\.[cm]?[jt]sx?|.+_spec\.rb)$",
+    re.IGNORECASE,
+)
+# Diese Funde zählen IMMER, auch in Test-Pfaden: ein echtes Secret, Malware oder
+# eine nicht prüfbare Datei ist dort genauso gefährlich wie anderswo.
+NEVER_EXCLUDED_CATEGORIES = {"secret", "malware", "malicious-package", "unscannable"}
 
 
 def _is_noise_path(path: str | None) -> bool:
@@ -116,7 +123,15 @@ def _is_noise_path(path: str | None) -> bool:
         return False
     p = "/" + path.replace("\\", "/").strip("/") + "/"
     p_lower = p.lower()
-    return any(pat in p_lower for pat in NOISE_PATH_PATTERNS)
+    if any(pat in p_lower for pat in NOISE_PATH_PATTERNS):
+        return True
+    return bool(_NOISE_FILE_PATTERN.match(p.rstrip("/").rsplit("/", 1)[-1]))
+
+
+def _excluded_from_score(severity: str, category: str, path: str | None) -> bool:
+    if severity == "critical" or category in NEVER_EXCLUDED_CATEGORIES:
+        return False
+    return _is_noise_path(path)
 
 
 @dataclass
@@ -133,7 +148,7 @@ class Finding:
     excluded_from_score: bool = False
 
     def __post_init__(self) -> None:
-        self.excluded_from_score = _is_noise_path(self.file)
+        self.excluded_from_score = _excluded_from_score(self.severity, self.category, self.file)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,6 +177,14 @@ def _norm_severity(raw: str) -> str:
     return "low"
 
 
+# Tools whose exit code does NOT mean "the tool failed". Every other tool is called so that it
+# exits 0 on success even with findings (bearer --exit-code 0, checkov --soft-fail, trufflehog/
+# trivy/guarddog without --fail/--exit-code options), so a non-zero exit is a real failure and
+# must surface as tools.<name>.error instead of an empty "clean" result. olevba returns codes
+# like 8 for a crash but always prints JSON with the details - scan_olevba reads that instead.
+_ANY_EXIT_CODE = {"olevba"}
+
+
 def run_tool(name: str, cmd: list[str], cwd: Path, timeout: int = 900) -> tuple[bool, str, str]:
     """Run external tool, return (ok, stdout, stderr). Never raises."""
     if shutil.which(cmd[0]) is None:
@@ -170,6 +193,9 @@ def run_tool(name: str, cmd: list[str], cwd: Path, timeout: int = 900) -> tuple[
         proc = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
         )
+        if proc.returncode != 0 and name not in _ANY_EXIT_CODE:
+            tail = "\n".join((proc.stderr or proc.stdout or "").strip().splitlines()[-5:])
+            return False, proc.stdout, f"{name} exit {proc.returncode}: {tail}"[:2000]
         return True, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return False, "", f"{name} timed out after {timeout}s"
@@ -296,7 +322,7 @@ def _relative_file(file: str | None, target: Path) -> str | None:
 def _relativize_findings(findings: list[Finding], target: Path) -> None:
     for f in findings:
         f.file = _relative_file(f.file, target)
-        f.excluded_from_score = _is_noise_path(f.file)
+        f.excluded_from_score = _excluded_from_score(f.severity, f.category, f.file)
 
 
 def resolve_target(target_arg: str) -> tuple[Path, tempfile.TemporaryDirectory | None, str]:
@@ -337,6 +363,83 @@ def resolve_target(target_arg: str) -> tuple[Path, tempfile.TemporaryDirectory |
         raise RuntimeError(f"{path} ist kein Verzeichnis und keine erkennbare Git-URL")
     kind = "lokales Git-Repo" if is_git_repo(path) else "lokaler Ordner (kein Git)"
     return path, None, kind
+
+
+# ---------------------------------------------------------------------------
+# Verschachtelte Archive (nur trufflehog schaut hinein, alle anderen Tools nicht)
+# ---------------------------------------------------------------------------
+
+NESTED_ARCHIVE_EXTENSIONS = {
+    ".zip", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".tbz2", ".xz", ".txz",
+    ".zst", ".lz", ".lzma", ".rar", ".cab", ".iso", ".jar", ".war", ".ear", ".apk",
+}
+_ARCHIVE_MAGIC = (
+    (0, b"PK\x03\x04"), (0, b"PK\x05\x06"), (0, b"7z\xbc\xaf\x27\x1c"), (0, b"\x1f\x8b"),
+    (0, b"BZh"), (0, b"\xfd7zXZ\x00"), (0, b"Rar!\x1a\x07"), (0, b"\x28\xb5\x2f\xfd"),
+    (0, b"MSCF"), (257, b"ustar"),
+)
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_SKIP_DIRS = {".git"}
+
+
+def _head(path: Path, size: int = 512) -> bytes:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(size)
+    except OSError:
+        return b""
+
+
+def _zip_names(path: Path) -> list[str] | None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return zf.namelist()
+    except Exception:  # noqa: BLE001 - broken zip: treat as opaque archive
+        return None
+
+
+def _is_office_or_odf_zip(names: list[str] | None) -> bool:
+    """OOXML (.docx/.xlsm ...) and ODF documents are ZIP containers, but documents - not
+    archives someone packed code into. Macros in them are olevba's job."""
+    if not names:
+        return False
+    return "[Content_Types].xml" in names or "mimetype" in names
+
+
+def _iter_files(target: Path):
+    for path in target.rglob("*"):
+        if any(part in _SKIP_DIRS for part in path.relative_to(target).parts):
+            continue
+        if path.is_file() and not path.is_symlink():
+            yield path
+
+
+def scan_nested_archives(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+    """An archive inside the upload is opaque to bearer/trivy/checkov/guarddog/olevba - its
+    content would pass as "checked". Detected by extension AND by magic bytes (renamed files)."""
+    findings: list[Finding] = []
+    meta: dict[str, Any] = {"tool": "unified-scan", "ran": True, "error": None}
+    for path in _iter_files(target):
+        head = _head(path)
+        by_magic = any(head[off:off + len(sig)] == sig for off, sig in _ARCHIVE_MAGIC)
+        by_ext = path.suffix.lower() in NESTED_ARCHIVE_EXTENSIONS
+        if not (by_magic or by_ext):
+            continue
+        if head.startswith(b"PK") and _is_office_or_odf_zip(_zip_names(path)):
+            continue
+        rel = str(path.relative_to(target))
+        findings.append(Finding(
+            tool="unified-scan",
+            severity="critical",
+            rule_id="nested-archive",
+            title=f"Verschachteltes Archiv: {rel}",
+            file=rel,
+            line=None,
+            category="unscannable",
+            description="Nested archive not scanned - upload its content unpacked instead.",
+        ))
+    meta["finding_count"] = len(findings)
+    return findings, meta
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +501,7 @@ def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, 
     ok, out, err = run_tool(
         "bearer",
         ["bearer", "scan", str(target), "--format", "json",
-         "--output", str(tmp_json), "--quiet"],
+         "--output", str(tmp_json), "--quiet", "--exit-code", "0"],
         cwd=target,
     )
     meta["ran"] = ok
@@ -499,29 +602,69 @@ def _parse_trufflehog_ndjson(out: str, git_mode: bool) -> list[Finding]:
     return findings
 
 
+def _has_git_history(target: Path) -> bool:
+    """History scan only for a real, readable repo at the scan root - a broken or empty .git
+    (easy to put into an archive) must not change what gets scanned."""
+    if not (target / ".git").is_dir():
+        return False
+    ok, _out, _err = run_tool(
+        "git", ["git", "-C", str(target), "rev-parse", "--verify", "--quiet", "HEAD"],
+        cwd=target, timeout=15,
+    )
+    return ok
+
+
+def _dedupe_secrets(findings: list[Finding]) -> list[Finding]:
+    seen: set[tuple] = set()
+    out: list[Finding] = []
+    for f in findings:
+        key = (f.rule_id, f.file, f.line, f.raw.get("Raw") or f.raw.get("RawV2"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
 # --no-verification: never send found credentials to their providers (AWS, GitHub, ...) to test
 # them live - a real leaked key would leave the machine for that. Findings stay pattern-based.
 def scan_trufflehog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
-    meta = {"tool": "trufflehog", "ran": False, "error": None}
-    git_mode = is_git_repo(target)
-
-    if git_mode:
-        cmd = ["trufflehog", "git", f"file://{target}", "--json", "--no-update", "--no-verification"]
-    else:
-        cmd = ["trufflehog", "filesystem", str(target), "--json", "--no-update", "--no-verification"]
-
-    ok, out, err = run_tool("trufflehog", cmd, cwd=target)
+    """Always scans the current file state; additionally the Git history if there is a valid
+    repo. History alone would miss everything not committed (e.g. a zipped working copy)."""
+    meta: dict[str, Any] = {"tool": "trufflehog", "ran": False, "error": None}
+    ok, out, err = run_tool(
+        "trufflehog",
+        ["trufflehog", "filesystem", str(target), "--json", "--no-update", "--no-verification"],
+        cwd=target,
+    )
     meta["ran"] = ok
-    meta["mode"] = "git-history" if git_mode else "filesystem-only"
     if not ok:
         meta["error"] = err
+        meta["mode"] = "filesystem"
         return [], meta
+    findings = _parse_trufflehog_ndjson(out, git_mode=False)
 
-    findings = _parse_trufflehog_ndjson(out, git_mode)
+    if _has_git_history(target):
+        meta["mode"] = "filesystem+git-history"
+        ok, out, err = run_tool(
+            "trufflehog",
+            ["trufflehog", "git", f"file://{target}", "--json", "--no-update", "--no-verification"],
+            cwd=target,
+        )
+        if ok:
+            findings += _parse_trufflehog_ndjson(out, git_mode=True)
+        else:
+            meta["error"] = f"git-history scan failed: {err}"
+    else:
+        meta["mode"] = "filesystem"
+        if (target / ".git").exists():
+            meta["note"] = "ungültiges/leeres .git - nur aktueller Dateistand geprüft."
+        else:
+            meta["note"] = ("kein Git-Repo erkannt — nur aktueller Dateistand geprüft, "
+                             "History-Scan (z.B. bei gelöschten Secrets) nicht möglich.")
+
+    findings = _dedupe_secrets(findings)
     meta["finding_count"] = len(findings)
-    if not git_mode:
-        meta["note"] = ("kein Git-Repo erkannt — nur aktueller Dateistand geprüft, "
-                         "History-Scan (z.B. bei gelöschten Secrets) nicht möglich.")
     return findings, meta
 
 
@@ -662,7 +805,7 @@ def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     ok, out, err = run_tool(
         "checkov",
         ["checkov", "-d", str(target), "--output", "json", "--quiet",
-         "--compact"],
+         "--compact", "--soft-fail"],
         cwd=target,
         timeout=600,
     )
@@ -785,6 +928,66 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
     return findings, None
 
 
+# Control manifests with one well-known, harmless package each. If guarddog fails on the upload's
+# manifest but succeeds on these, the failure is caused by the uploaded file; if it fails on these
+# too, it's the network/proxy/registry. Decided by behaviour, not by parsing error text - error
+# messages can echo manifest content, which the uploader controls.
+_GUARDDOG_CONTROL = {"pypi": ("requirements.txt", "six==1.16.0\n"),
+                     "npm": ("package.json", '{"dependencies": {"left-pad": "1.3.0"}}\n')}
+_guarddog_control_cache: dict[str, bool] = {}
+
+
+def _guarddog_control_ok(ecosystem: str) -> bool:
+    if ecosystem not in _guarddog_control_cache:
+        with tempfile.TemporaryDirectory(prefix="unified-scan-guarddog-control-") as tmp:
+            name, content = _GUARDDOG_CONTROL[ecosystem]
+            (Path(tmp) / name).write_text(content)
+            ok, out, _err = run_tool(
+                "guarddog",
+                ["guarddog", ecosystem, "verify", "--output-format", "json", "--", tmp],
+                cwd=Path(tmp), timeout=180,
+            )
+            _guarddog_control_cache[ecosystem] = ok and _parse_guarddog_json(out, ecosystem)[1] is None
+    return _guarddog_control_cache[ecosystem]
+
+
+_MANIFEST_NAMES = {"pypi": re.compile(r"^requirements.*\.txt$", re.IGNORECASE),
+                   "npm": re.compile(r"^package\.json$")}
+
+
+def _manifests(target: Path, ecosystem: str) -> list[str]:
+    pattern = _MANIFEST_NAMES[ecosystem]
+    return sorted(str(p.relative_to(target)) for p in _iter_files(target)
+                  if pattern.match(p.name) and "node_modules" not in p.relative_to(target).parts)
+
+
+def _broken_package_json(target: Path) -> list[str]:
+    broken = []
+    for rel in _manifests(target, "npm"):
+        try:
+            data = json.loads((target / rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            broken.append(rel)
+            continue
+        if not isinstance(data, dict):
+            broken.append(rel)
+    return broken
+
+
+def _unscannable_manifest(rel: str, reason: str) -> Finding:
+    return Finding(
+        tool="guarddog",
+        severity="critical",
+        rule_id="unscannable.manifest",
+        title=f"Abhängigkeitsliste nicht prüfbar: {rel}",
+        file=rel,
+        line=None,
+        category="unscannable",
+        description=f"Dependency manifest could not be checked for malicious packages - fix its "
+                    f"syntax and upload again. ({reason})"[:800],
+    )
+
+
 def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     """Prüft alle PyPI/npm-Dependencies im Projekt auf bösartige Pakete
     (Typosquatting, verdächtige Install-Scripts, Daten-Exfiltration-Muster,
@@ -798,6 +1001,11 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
         meta["error"] = "guarddog not found in PATH"
         return findings, meta
 
+    flagged: set[str] = set()
+    for rel in _broken_package_json(target):
+        findings.append(_unscannable_manifest(rel, "package.json is not valid JSON"))
+        flagged.add(rel)
+
     any_ran = False
     for ecosystem in ("pypi", "npm"):
         ok, out, err = run_tool(
@@ -806,18 +1014,30 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
             cwd=target,
             timeout=900,
         )
-        if not ok:
+        if ok:
+            parsed, parse_error = _parse_guarddog_json(out, ecosystem)
+            if not parse_error:
+                any_ran = True
+                meta["ecosystems_checked"].append(ecosystem)
+                findings += parsed
+                continue
+            err = parse_error
+        # A failure caused by the uploaded manifest itself would otherwise switch off the
+        # malware check per file - that blocks as "unscannable". Network/proxy trouble is
+        # infrastructure and only gets reported as an error.
+        manifests = _manifests(target, ecosystem)
+        if not manifests or not _guarddog_control_ok(ecosystem):
             meta.setdefault("ecosystem_errors", {})[ecosystem] = err
             continue
-        any_ran = True
-        meta["ecosystems_checked"].append(ecosystem)
-        parsed, parse_error = _parse_guarddog_json(out, ecosystem)
-        findings += parsed
-        if parse_error:
-            meta.setdefault("ecosystem_errors", {})[ecosystem] = parse_error
+        named = [m for m in manifests if m in (err or "")]
+        for rel in named or manifests:
+            if rel not in flagged:
+                findings.append(_unscannable_manifest(rel, (err or "")[:300]))
+                flagged.add(rel)
+        meta.setdefault("manifest_errors", {})[ecosystem] = err
 
-    meta["ran"] = any_ran
-    if not any_ran:
+    meta["ran"] = any_ran or bool(flagged)
+    if not meta["ran"]:
         meta["error"] = meta.get("error") or "weder pypi- noch npm-Scan liefen erfolgreich durch"
     meta["finding_count"] = len(findings)
     if any_ran and not findings:
@@ -891,11 +1111,21 @@ def _find_office_macro_files(target: Path) -> list[Path]:
     """Case-insensitiver Vergleich der Datei-Endung (nicht rglob-Pattern-Matching):
     auf Linux ist rglob("*.docm") case-sensitiv und würde ein absichtlich groß
     geschriebenes 'Invoice.DOCM' (in Windows-Umgebungen üblich, z.B. E-Mail-
-    Anhänge) unsichtbar am Scanner vorbeischleusen — verifiziert."""
+    Anhänge) unsichtbar am Scanner vorbeischleusen — verifiziert.
+    Zusätzlich nach Inhalt: OLE-Container (D0CF11E0) und OOXML-ZIPs mit
+    vbaProject.bin werden auch mit harmloser Endung (.bin/.dat/...) geprüft."""
     found: list[Path] = []
-    for path in target.rglob("*"):
-        if path.is_file() and path.suffix.lower() in _OFFICE_MACRO_EXTENSIONS:
+    for path in _iter_files(target):
+        if path.suffix.lower() in _OFFICE_MACRO_EXTENSIONS:
             found.append(path)
+            continue
+        head = _head(path, 8)
+        if head == _OLE_MAGIC:
+            found.append(path)
+        elif head.startswith(b"PK\x03\x04"):
+            names = _zip_names(path) or []
+            if any(n.lower().endswith("vbaproject.bin") for n in names):
+                found.append(path)
     return sorted(set(found))
 
 
@@ -931,6 +1161,9 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
         meta["files_scanned"] += 1
         if not ok:
             meta.setdefault("file_errors", {})[rel_path] = err
+            continue
+        if not out.strip():
+            meta.setdefault("file_errors", {})[rel_path] = f"olevba produced no output ({err.strip()[:200]})"
             continue
         try:
             entries = json.loads(out)
@@ -984,6 +1217,21 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
                     description=f"Keyword: {keyword!r} | {item.get('description', '')}"[:800],
                     raw=item,
                 ))
+
+    # An Office file olevba cannot analyse (crash, encrypted, timeout) hides its macros - that
+    # blocks as "unscannable" instead of passing as a partly checked upload.
+    for rel_path, reason in sorted((meta.get("file_errors") or {}).items()):
+        findings.append(Finding(
+            tool="olevba",
+            severity="critical",
+            rule_id="unscannable.office-file",
+            title=f"Office-Datei nicht prüfbar: {rel_path}",
+            file=rel_path,
+            line=None,
+            category="unscannable",
+            description=f"Office file could not be analysed for macros - save it again as a normal "
+                        f"unencrypted file and upload again. ({str(reason)[:300]})"[:800],
+        ))
 
     meta["finding_count"] = len(findings)
     if meta["files_scanned"] and not findings:
@@ -1154,6 +1402,12 @@ def main() -> int:
 
         tool_meta: dict[str, Any] = {}
 
+        nested_findings, m = scan_nested_archives(target)
+        tool_meta["nested_archives"] = m
+        if nested_findings:
+            print(f"[unified-scan] {len(nested_findings)} verschachtelte(s) Archiv(e) — "
+                  "deren Inhalt wird von den meisten Tools nicht geprüft.")
+
         print("[0/7] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
         malware_findings, m = scan_guarddog(target)
         _relativize_findings(malware_findings, target)
@@ -1161,7 +1415,9 @@ def main() -> int:
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        malware_critical = [f for f in malware_findings if f.severity == "critical"]
+        malware_findings = nested_findings + malware_findings
+        malware_critical = [f for f in malware_findings
+                            if f.severity == "critical" and f.category == "malware"]
         if malware_critical:
             print()
             print(f"[unified-scan] MALWARE-GATE FEHLGESCHLAGEN: "
