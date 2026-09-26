@@ -1,0 +1,230 @@
+{
+  "_doc": [
+    "Severity policy for Bearer findings in small internal employee tools (IDV: CLI scripts, Excel/CSV processing, file tooling, small dashboards).",
+    "Bearer's defaults assume a web application with untrusted users - several rules then fire on completely normal script code (e.g. open(path) with a function argument).",
+    "Applied to tool == 'bearer' only, never to categories secret/malware/malicious-package/unscannable.",
+    "'reason' is German on purpose: gvintra shows it to employees next to the downgraded finding.",
+    "Rules are checked top to bottom, the FIRST matching 'match' (fnmatch glob on the Bearer rule id) wins. Rules not listed keep Bearer's severity.",
+    "mode 'set' = replace severity, mode 'min' = raise to at least this severity (never lowers).",
+    "Blocking in gvintra: critical/high/medium block (high/medium can be justified per finding), low/info are hints only.",
+    "Disable for comparison: --no-severity-policy or UNIFIED_SCAN_SEVERITY_POLICY=off. Other file: UNIFIED_SCAN_SEVERITY_POLICY_FILE=/path.json"
+  ],
+  "rules": [
+    {
+      "match": "*_eval_using_user_input",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+    },
+    {
+      "match": "*_eval_user_input",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+    },
+    {
+      "match": "*_code_injection",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+    },
+    {
+      "match": "*_deserialization_of_user_input",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Einlesen fremder Objekt-Daten bleibt immer kritisch"
+    },
+    {
+      "match": "*_template_injection",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+    },
+    {
+      "match": "*_os_command_injection",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Schlägt auch bei festen Befehlen ohne Shell an – blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_dynamic_os_command",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Schlägt auch bei festen Befehlen ohne Shell an – blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_avoid_pickle",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Lokaler Pickle-Cache ist in Skripten üblich – blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_hardcoded_secret",
+      "mode": "min",
+      "severity": "high",
+      "reason": "Passwörter und Schlüssel gehören nicht in den Code"
+    },
+    {
+      "match": "*_jwt_hardcoded_secret",
+      "mode": "min",
+      "severity": "high",
+      "reason": "Passwörter und Schlüssel gehören nicht in den Code"
+    },
+    {
+      "match": "*_passport_hardcoded_secret",
+      "mode": "min",
+      "severity": "high",
+      "reason": "Passwörter und Schlüssel gehören nicht in den Code"
+    },
+    {
+      "match": "*_ssl_verification",
+      "mode": "min",
+      "severity": "high",
+      "reason": "Abgeschaltete Zertifikatsprüfung blockiert weiter"
+    },
+    {
+      "match": "*_missing_tls_validation",
+      "mode": "min",
+      "severity": "high",
+      "reason": "Abgeschaltete Zertifikatsprüfung blockiert weiter"
+    },
+    {
+      "match": "*_weak_password_*",
+      "mode": "min",
+      "severity": "medium",
+      "reason": "Schwach verschlüsselte Passwörter blockieren weiter"
+    },
+    {
+      "match": "*_sql_injection",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Zusammengesetztes SQL ist in Auswertungen üblich – begründbar, wenn die Eingabe fest ist"
+    },
+    {
+      "match": "*_sql_user_input",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Zusammengesetztes SQL ist in Auswertungen üblich – begründbar, wenn die Eingabe fest ist"
+    },
+    {
+      "match": "*_nosql_injection",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Abfrage aus Eingaben zusammengesetzt – begründbar, wenn die Eingabe fest ist"
+    },
+    {
+      "match": "*_cross_site_scripting",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_raw_html_using_user_input",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_html_user_input",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_open_redirect",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_server_side_request_forgery",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur relevant, wenn Fremde die Adresse bestimmen – sonst begründbar"
+    },
+    {
+      "match": "*_http_url_using_user_input",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur relevant, wenn Fremde die Adresse bestimmen – sonst begründbar"
+    },
+    {
+      "match": "*_path_traversal",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dateipfade aus Aufruf oder Konfiguration sind bei Skripten normal"
+    },
+    {
+      "match": "*_non_literal_fs_filename",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dateipfade aus Aufruf oder Konfiguration sind bei Skripten normal"
+    },
+    {
+      "match": "*_path_using_user_input",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dateipfade aus Aufruf oder Konfiguration sind bei Skripten normal"
+    },
+    {
+      "match": "*_logger_leak",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Log-Ausgabe eines lokalen Skripts – nur Hinweis"
+    },
+    {
+      "match": "*_insecure_cookie*",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_cookie_missing_*",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_default_cookie_config",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_default_session_config",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_insecure_allow_origin",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung (CORS) – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_permissive_allow_origin",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung (CORS) – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_helmet_missing",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_reduce_fingerprint",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "match": "*_static_asset_with_session",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    }
+  ]
+}

@@ -61,7 +61,7 @@ RUN if [ "$TRIVY_BAKE_DB" = "1" ]; then trivy image --download-db-only --cache-d
 
 RUN useradd --create-home --uid 10001 scanner
 WORKDIR /opt/unified-scan
-COPY unified_scan.py safe_extract.py http_wrapper.py entrypoint.sh ./
+COPY unified_scan.py safe_extract.py http_wrapper.py entrypoint.sh severity_policy.json ./
 RUN chmod 0755 /opt/unified-scan/entrypoint.sh
 
 # Read-only rootfs at runtime: everything the tools write (bearer/checkov caches, jobs) goes

@@ -76,6 +76,7 @@ vermerkt das unter tools.bearer wenn effektiv nichts gefunden wurde.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -146,6 +147,8 @@ class Finding:
     description: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     excluded_from_score: bool = False
+    original_severity: str | None = None  # set when severity_policy.json changed the severity
+    policy_reason: str | None = None
 
     def __post_init__(self) -> None:
         self.excluded_from_score = _excluded_from_score(self.severity, self.category, self.file)
@@ -161,6 +164,8 @@ class Finding:
             "category": self.category,
             "description": self.description,
             "excluded_from_score": self.excluded_from_score,
+            "original_severity": self.original_severity,
+            "policy_reason": self.policy_reason,
         }
 
 
@@ -489,7 +494,78 @@ def _plain_summary(text: str, limit: int = 500) -> str:
     return summary[:limit]
 
 
-def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# Severity-Policy für Bearer (interne Mitarbeiter-Skripte statt Web-Apps)
+# ---------------------------------------------------------------------------
+
+SEVERITY_POLICY_FILE = Path(__file__).resolve().parent / "severity_policy.json"
+_POLICY_MODES = {"set", "min"}
+
+
+def load_severity_policy(path: Path | None = None) -> list[dict[str, Any]]:
+    """Rules from severity_policy.json (see its _doc). [] when disabled via
+    UNIFIED_SCAN_SEVERITY_POLICY=off. A broken policy file raises - silently scanning without
+    it would change what blocks without anyone noticing."""
+    if os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY", "").strip().lower() in ("off", "0", "false"):
+        return []
+    path = path or Path(os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY_FILE") or SEVERITY_POLICY_FILE)
+    rules = json.loads(path.read_text(encoding="utf-8"))["rules"]
+    for r in rules:
+        if r.get("mode") not in _POLICY_MODES or r.get("severity") not in SEVERITY_ORDER \
+                or not r.get("match"):
+            raise ValueError(f"invalid severity policy rule: {r!r}")
+    return rules
+
+
+def apply_severity_policy(finding: Finding, rules: list[dict[str, Any]]) -> None:
+    """First matching rule wins. Only for bearer, never for secret/malware/unscannable."""
+    if finding.tool != "bearer" or finding.category in NEVER_EXCLUDED_CATEGORIES:
+        return
+    for r in rules:
+        if not fnmatch.fnmatchcase(finding.rule_id, r["match"]):
+            continue
+        target = r["severity"]
+        if r["mode"] == "min" and SEVERITY_ORDER.index(finding.severity) <= SEVERITY_ORDER.index(target):
+            return  # already at least that severe
+        if target != finding.severity:
+            finding.original_severity = finding.severity
+            finding.policy_reason = r.get("reason") or None
+            finding.severity = target
+            finding.excluded_from_score = _excluded_from_score(
+                finding.severity, finding.category, finding.file)
+        return
+
+
+def parse_bearer_json(data: dict[str, Any],
+                      policy: list[dict[str, Any]] | None = None) -> list[Finding]:
+    findings: list[Finding] = []
+    for sev_key in ("critical", "high", "medium", "low"):
+        for item in data.get(sev_key, []) or []:
+            fname = (item.get("filename") or item.get("full_filename") or "")
+            line = None
+            src = item.get("source") or {}
+            if isinstance(src, dict):
+                line = src.get("start")
+            findings.append(Finding(
+                tool="bearer",
+                severity=_norm_severity(sev_key),
+                rule_id=item.get("rule_id") or item.get("id") or "bearer.unknown",
+                title=item.get("title") or item.get("rule_id") or "Bearer finding",
+                file=fname or None,
+                line=line,
+                category="privacy" if "lang_" not in (item.get("rule_id") or "") and
+                          any(k in (item.get("id") or "") for k in ("pii", "phi", "data"))
+                          else "security",
+                description=_plain_summary(item.get("description") or ""),
+                raw=item,
+            ))
+    for f in findings:
+        apply_severity_policy(f, policy or [])
+    return findings
+
+
+def scan_bearer(target: Path, tmp_json: Path,
+                policy: list[dict[str, Any]] | None = None) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     meta = {"tool": "bearer", "ran": False, "error": None}
 
@@ -524,26 +600,9 @@ def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, 
         meta["error"] = f"could not parse bearer json: {e}"
         return findings, meta
 
-    for sev_key in ("critical", "high", "medium", "low"):
-        for item in data.get(sev_key, []) or []:
-            fname = (item.get("filename") or item.get("full_filename") or "")
-            line = None
-            src = item.get("source") or {}
-            if isinstance(src, dict):
-                line = src.get("start")
-            findings.append(Finding(
-                tool="bearer",
-                severity=_norm_severity(sev_key),
-                rule_id=item.get("rule_id") or item.get("id") or "bearer.unknown",
-                title=item.get("title") or item.get("rule_id") or "Bearer finding",
-                file=fname or None,
-                line=line,
-                category="privacy" if "lang_" not in (item.get("rule_id") or "") and
-                          any(k in (item.get("id") or "") for k in ("pii", "phi", "data"))
-                          else "security",
-                description=_plain_summary(item.get("description") or ""),
-                raw=item,
-            ))
+    findings = parse_bearer_json(data, policy)
+    meta["severity_policy_applied"] = bool(policy)
+    meta["severity_policy_changed"] = sum(1 for f in findings if f.original_severity)
     meta["finding_count"] = len(findings)
     if not findings:
         meta["note"] = ("keine Findings — falls das Projekt in einer von bearer "
@@ -1380,7 +1439,11 @@ def main() -> int:
                               "GitHub, GitLab, jeder Git-Host funktioniert")
     parser.add_argument("--out", default="unified-scan-report",
                          help="Ausgabeverzeichnis (default: ./unified-scan-report)")
+    parser.add_argument("--no-severity-policy", action="store_true",
+                         help="Bearer-Schweregrade unverändert lassen (severity_policy.json "
+                              "nicht anwenden, z.B. zum Vergleich)")
     args = parser.parse_args()
+    policy = [] if args.no_severity_policy else load_severity_policy()
 
     try:
         target, tmp_handle, source_kind = resolve_target(args.target)
@@ -1445,7 +1508,7 @@ def main() -> int:
 
 
         print("[1/7] bearer (SAST + Privacy)...")
-        f, m = scan_bearer(target, out_dir / "_bearer_raw.json")
+        f, m = scan_bearer(target, out_dir / "_bearer_raw.json", policy)
         all_findings += f
         tool_meta["bearer"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"

@@ -324,6 +324,45 @@ Erzeugt in `./report/`:
 Exit-Code `1` wenn mindestens ein `critical`-Finding vorliegt (CI-tauglich),
 sonst `0`.
 
+## Schweregrade für interne Skripte (`severity_policy.json`)
+
+Bearers Standard-Schweregrade gehen von einer Web-App mit fremden Nutzern aus. Bei kleinen
+internen Tools (CLI-Skripte, Excel/CSV-Verarbeitung, Datei-Tools) schlagen dadurch Regeln
+auf völlig normalen Code an, z.B. `open(pfad)` mit einem Funktionsparameter als „high –
+path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz um:
+
+- **bleibt kritisch:** `eval`/`exec` mit Eingaben, Code-/Template-Injection, Deserialisierung
+  fremder Daten
+- **high (blockiert, aber pro Fund begründbar):** OS-Befehle (`*_os_command_injection` –
+  schlägt auch bei festen Befehlslisten ohne Shell an), Pickle, abgeschaltete
+  TLS-Prüfung (mindestens high), hartcodierte Secrets (mindestens high)
+- **medium (blockiert, begründbar):** SQL-/NoSQL-Injection, XSS/Open Redirect/SSRF (nur bei
+  Tools mit Weboberfläche relevant), schwache Passwort-Hashes (mindestens medium)
+- **low (nur Hinweis):** Dateipfade aus Aufruf/Konfiguration (`*_path_traversal`,
+  `*_non_literal_fs_filename`), Log-Ausgaben, Cookie-/CORS-/Header-Härtung
+- **nicht gelistete Regeln** behalten Bearers Schweregrad
+
+Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die
+Bearer-Regel-ID) gewinnt; `mode: "set"` ersetzt, `mode: "min"` hebt nur an. Gilt nur für
+`tool == "bearer"`, nie für `secret`/`malware`/`malicious-package`/`unscannable`. Geänderte
+Funde tragen `original_severity` und `policy_reason` (deutsch, zum Anzeigen gedacht);
+Score und Ampel rechnen mit dem neuen Schweregrad.
+
+Abschalten zum Vergleich: `--no-severity-policy` bzw. `UNIFIED_SCAN_SEVERITY_POLICY=off`
+(auch im HTTP-Wrapper). Eigene Datei: `UNIFIED_SCAN_SEVERITY_POLICY_FILE=/pfad.json`. Eine
+kaputte Policy-Datei bricht den Lauf ab, statt still ohne Policy zu scannen.
+
+Gemessen an einem erfundenen Korpus typischer interner Skripte
+(`tests/fixtures/idv_corpus/`, bearer-rules v0.48.4): von 16 harmlosen Skripten blockierten
+vorher 7 (13 blockierende Funde, 3 davon kritisch), nachher 2 – beide nur noch begründbar
+(lokaler Pickle-Cache, `subprocess.run` mit fester Liste). Alle gefährlichen Beispiele
+(`eval` mit Eingabe, `shell=True` mit Eingabe, `os.system`, Pickle aus dem Netz,
+`verify=False`, MD5 für Passwörter) blockieren weiter; `eval` bleibt kritisch.
+
+Bekannte Lücken von Bearer selbst (nicht von der Policy): im Korpus nicht erkannt wurden ein
+hartcodiertes Passwort in einem Connection-String, zusammengesetztes SQL mit `sqlite3`,
+`yaml.load` mit unsicherem Loader und `child_process.exec`/`eval` in Node.
+
 ## Test-Code-Filter
 
 Findings in echten Test-Pfaden (`test/`, `tests/`, `__tests__/`, `spec/`,

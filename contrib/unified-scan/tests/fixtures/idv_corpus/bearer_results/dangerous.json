@@ -1,0 +1,154 @@
+{
+ "critical": [
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "pickle_remote.py",
+   "full_filename": "/src/pickle_remote.py",
+   "id": "python_lang_avoid_pickle",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 35,
+     "start": 12
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "Usage of unsafe Pickle libraries"
+  },
+  {
+   "cwe_ids": [
+    "95"
+   ],
+   "filename": "eval_input.py",
+   "full_filename": "/src/eval_input.py",
+   "id": "python_lang_eval_using_user_input",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 22,
+     "start": 12
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Unsanitized user input in 'eval' type function"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "os_system_input.py",
+   "full_filename": "/src/os_system_input.py",
+   "id": "python_lang_os_command_injection",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 49,
+     "start": 1
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Unsanitized user input in OS command"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "shell_input.py",
+   "full_filename": "/src/shell_input.py",
+   "id": "python_lang_os_command_injection",
+   "line_number": 6,
+   "source": {
+    "column": {
+     "end": 80,
+     "start": 12
+    },
+    "end": 6,
+    "start": 6
+   },
+   "title": "Unsanitized user input in OS command"
+  }
+ ],
+ "high": [
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 20,
+     "start": 10
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "Unsanitized dynamic input in file path"
+  },
+  {
+   "cwe_ids": [
+    "295"
+   ],
+   "filename": "tls_off.py",
+   "full_filename": "/src/tls_off.py",
+   "id": "python_lang_ssl_verification",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 55,
+     "start": 12
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Missing SSL certificate verification"
+  }
+ ],
+ "low": [
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "exec_js.js",
+   "full_filename": "/src/exec_js.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 57,
+     "start": 41
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Leakage of information in logger message"
+  }
+ ],
+ "medium": [
+  {
+   "cwe_ids": [
+    "328"
+   ],
+   "filename": "weak_hash_password.py",
+   "full_filename": "/src/weak_hash_password.py",
+   "id": "python_lang_weak_hash_md5",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 36,
+     "start": 12
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Usage of weak hashing library (MDx)"
+  }
+ ]
+}
