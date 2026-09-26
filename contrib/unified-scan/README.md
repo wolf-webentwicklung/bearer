@@ -340,6 +340,12 @@ path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz
   Tools mit Weboberfläche relevant), schwache Passwort-Hashes (mindestens medium)
 - **low (nur Hinweis):** Dateipfade aus Aufruf/Konfiguration (`*_path_traversal`,
   `*_non_literal_fs_filename`), Log-Ausgaben, Cookie-/CORS-/Header-Härtung
+- **medium statt kritisch:** unverschlüsseltes SMTP (`*_insecure_smtp`) – TLS wird in
+  Skripten oft per Konfiguration zugeschaltet (`starttls()`), das sieht Bearer nicht
+- **Zeilenprüfung für `*_code_injection`:** liegt der kritische Fund auf einer Zeile, die nur
+  `setattr`/`getattr`/`delattr` aufruft (und kein `eval`/`exec`/`compile`), wird er high
+  (begründbar) – ein dynamischer Attributname setzt ein Feld, er führt keinen Code aus. Das
+  steckt in `refine_code_injection()`, nicht in der JSON-Datei, weil es die Quellzeile liest
 - **nicht gelistete Regeln** behalten Bearers Schweregrad
 
 Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die
@@ -494,6 +500,21 @@ werden erkannt (Stage-Aliase wie `AS builder` fließen nicht als Image-Ref
 ein). Relevant weil viele AI-gebaute Dashboards mit veralteten Docker-
 Base-Images deployed werden (z.B. `python:3.9-slim`, `node:12-alpine`),
 die selbst Dutzende bekannte CVEs mitbringen, unabhängig vom eigenen Code.
+
+Jeder Fund trägt `image` (das Basis-Image, aus dem er stammt). Schweregrad per
+`base_image`-Abschnitt in `severity_policy.json`: Basis-Image-Lücken sind nur ein **Hinweis
+(`low`)** – sie liegen in den OS-Paketen des Images, nicht im hochgeladenen Code, und fast
+jedes Image hat Dutzende. **Ausnahme:** `critical` **mit** vorhandener `fixed_version` bleibt
+blockierend, weil ein Neubauen des Images sie behebt. Mit abgeschalteter Policy bleiben die
+Schweregrade von trivy.
+
+## Doppelte Funde
+
+`drop_duplicate_findings()` meldet identische Funde nur einmal: gleiches Tool, gleiche Regel,
+gleiche Datei und Zeile (Bearer meldet eine Stelle teils pro Datenfluss mehrfach). Bei
+`trivy-image` zählt dieselbe CVE im selben Image nur einmal – auch wenn sie mehrere OS-Pakete
+betrifft (`libc6`, `libc-bin` …) oder mehrere `FROM`-Zeilen dasselbe Image nutzen. Bei `trivy`
+(Lockfiles) bleibt dieselbe CVE in verschiedenen Paketen getrennt.
 
 ## Malware-Gate im Detail
 
