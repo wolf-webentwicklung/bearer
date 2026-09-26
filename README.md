@@ -1,23 +1,26 @@
 ## 🔧 Dies ist ein erweiterter Fork von [Bearer/bearer](https://github.com/Bearer/bearer)
 
 Bearer allein deckt SAST + Privacy/Datenfluss ab (sein Kern, unverändert).
-Dieser Fork ergänzt das um ein vorgelagertes **Malware-Gate** und drei
+Dieser Fork ergänzt das um ein vorgelagertes **Malware-Gate** und vier
 weitere Security-Scanner zu einer kombinierten Pipeline mit zwei
 Report-Ebenen — gebaut für schnell mit AI-Tools erstellte Anwendungen
 ("vibe coded" Dashboards/Tools, z.B. mit ChatGPT/Claude gebaut), die teils
 live mit echten Daten laufen.
 
-**Neu in diesem Fork** (siehe [`contrib/unified-scan/`](contrib/unified-scan/)):
+**Gesamter Pipeline-Ablauf** (Bearer-Kern + alle Ergänzungen dieses Forks,
+siehe [`contrib/unified-scan/`](contrib/unified-scan/)):
 
-| Tool | Neu hinzugefügt für | 
-|---|---|
-| **guarddog** | Malware-Gate — läuft ZUERST, prüft PyPI/npm-Dependencies auf bösartige Pakete. Fund → Pipeline stoppt, Security-Scan läuft gar nicht erst. |
-| **trufflehog** | Secrets im Code + komplette Git-History (auch gelöschte, aber noch in der History liegende Secrets) |
-| **trivy** | Dependency-CVEs (SCA) + Docker-Base-Image-CVEs |
-| **checkov** | IaC-Fehlkonfigurationen (Terraform/K8s/Docker/CloudFormation) |
+| Stufe | Tool | Rolle |
+|---|---|---|
+| 0 (Gate) | **[guarddog](https://github.com/DataDog/guarddog)** *(neu)* | Malware-Gate — läuft ZUERST, prüft PyPI/npm-Dependencies auf bösartige Pakete. Fund → Pipeline stoppt, Security-Scan läuft gar nicht erst. |
+| 1 | **[bearer](https://github.com/Bearer/bearer)** *(Original-Kern)* | SAST + Privacy/Datenfluss — unverändert das, was dieser Fork erweitert |
+| 2 | **[trufflehog](https://github.com/trufflesecurity/trufflehog)** *(neu)* | Secrets im Code + komplette Git-History (auch gelöschte, aber noch in der History liegende Secrets) |
+| 3 | **[trivy](https://github.com/aquasecurity/trivy)** *(neu)* | Dependency-CVEs (SCA) + Docker-Base-Image-CVEs |
+| 4 | **[checkov](https://github.com/bridgecrewio/checkov)** *(neu)* | IaC-Fehlkonfigurationen (Terraform/K8s/Docker/CloudFormation) |
+| 5 | **[oletools/olevba](https://github.com/decalage2/oletools)** *(neu)* | Office-VBA-Makros (.doc\*/.xls\*/.ppt\*): AutoExec, Shell/PowerShell-Aufrufe, Obfuskierung |
 
 Ablauf: `guarddog` (Malware-Gate) → nur wenn sauber → `bearer` +
-`trufflehog` + `trivy` + `checkov` (Security-Scan).
+`trufflehog` + `trivy` + `checkov` + `olevba` (Security-Scan).
 
 - Funktioniert mit lokalen Ordnern, egal ob mit oder ohne Git (z.B. ein
   Skript, das direkt auf einem Server bearbeitet und nie in eine
