@@ -340,6 +340,31 @@ path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz
   Tools mit Weboberfläche relevant), schwache Passwort-Hashes (mindestens medium)
 - **low (nur Hinweis):** Dateipfade aus Aufruf/Konfiguration (`*_path_traversal`,
   `*_non_literal_fs_filename`), Log-Ausgaben, Cookie-/CORS-/Header-Härtung
+- **medium statt kritisch:** unverschlüsseltes SMTP (`*_insecure_smtp`) – TLS wird in
+  Skripten oft per Konfiguration zugeschaltet (`starttls()`), das sieht Bearer nicht
+- **Zeilenprüfung für `*_code_injection`:** liegt der kritische Fund auf einer Zeile, die nur
+  `setattr`/`getattr`/`delattr` aufruft (und kein `eval`/`exec`/`compile`), wird er high
+  (begründbar) – ein dynamischer Attributname setzt ein Feld, er führt keinen Code aus. Das
+  steckt in `refine_code_injection()`, nicht in der JSON-Datei, weil es die Quellzeile liest
+- **Checkov-Hygiene (nur Hinweis):** Dockerfile-/Workflow-Checks ohne Sicherheitslücke im Code
+  (`CKV_DOCKER_2/3/4/5/7/9` – HEALTHCHECK, USER, ADD, apt, `latest`; `CKV2_GHA_1`, `CKV_GHA_7`).
+  Regeln mit `"tool": "checkov"` gelten nur für Checkov, alle anderen nur für Bearer
+- **GuardDog auf weit verbreiteten Paketen (`guarddog`-Abschnitt):** GuardDogs Code-Heuristiken
+  schlagen bei großen, beliebten Paketen (pandas, SQLAlchemy, PyYAML, Jinja2, `@prisma/client` …)
+  ständig an und haben den ganzen Scan am Malware-Gate gestoppt. Ein Paket unter den
+  `trusted_top_n` (5000) meistgeladenen der Registry – laut GuardDogs eigener
+  `top_<ökosystem>_packages.json` – wird zum Hinweis. Typosquats dieser Pakete stehen per
+  Definition nicht auf der Liste und blockieren weiter, ebenso jedes andere Paket. Fehlt die
+  Liste, wird nichts herabgestuft
+  **Restrisiko:** Eine kompromittierte Version eines beliebten Pakets (Supply-Chain-Angriff auf
+  den Maintainer) erscheint dadurch nur als Hinweis. Bekannte bösartige Versionen meldet trivy
+  über seine Advisory-Datenbank weiterhin; `trusted_top_n` lässt sich verkleinern oder auf 0
+  setzen (dann wird nichts herabgestuft)
+- **Exceptions mit Daten (`*_exception`) nur Hinweis:** betrifft Fehlermeldungen in Web-Antworten;
+  schlug in mehreren Projekten auf harmlosen Zeilen an (z.B. `super().__init__`)
+- **olevba:** Button-Handler (`*_Click`, `*_DblClick`) sind nur ein Hinweis – sie laufen erst beim
+  Klick. Andere Ereignisse (`Workbook_Open`, `AutoOpen`, `_Layout`, `_Painted` …) bleiben high.
+  Die Sammelzeile „Hex Strings“/„Base64 Strings“ ist wie einzelne kodierte Strings nur ein Hinweis
 - **nicht gelistete Regeln** behalten Bearers Schweregrad
 
 Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die
@@ -495,6 +520,21 @@ ein). Relevant weil viele AI-gebaute Dashboards mit veralteten Docker-
 Base-Images deployed werden (z.B. `python:3.9-slim`, `node:12-alpine`),
 die selbst Dutzende bekannte CVEs mitbringen, unabhängig vom eigenen Code.
 
+Jeder Fund trägt `image` (das Basis-Image, aus dem er stammt). Schweregrad per
+`base_image`-Abschnitt in `severity_policy.json`: Basis-Image-Lücken sind nur ein **Hinweis
+(`low`)** – sie liegen in den OS-Paketen des Images, nicht im hochgeladenen Code, und fast
+jedes Image hat Dutzende. **Ausnahme:** `critical` **mit** vorhandener `fixed_version` bleibt
+blockierend, weil ein Neubauen des Images sie behebt. Mit abgeschalteter Policy bleiben die
+Schweregrade von trivy.
+
+## Doppelte Funde
+
+`drop_duplicate_findings()` meldet identische Funde nur einmal: gleiches Tool, gleiche Regel,
+gleiche Datei und Zeile (Bearer meldet eine Stelle teils pro Datenfluss mehrfach). Bei
+`trivy-image` zählt dieselbe CVE im selben Image nur einmal – auch wenn sie mehrere OS-Pakete
+betrifft (`libc6`, `libc-bin` …) oder mehrere `FROM`-Zeilen dasselbe Image nutzen. Bei `trivy`
+(Lockfiles) bleibt dieselbe CVE in verschiedenen Paketen getrennt.
+
 ## Malware-Gate im Detail
 
 `guarddog` prüft alle `requirements.txt`/`package.json`-Dateien im
@@ -598,3 +638,12 @@ Angriffsklasse, unabhängig von der Shell.
   bis `[6/7]`) end-to-end gegen ein gemischtes Git-Repo (Python-Datei +
   2 Office-Dateien) durchlaufen, Score/Verdict korrekt aus den
   olevba-Findings berechnet.
+
+## Validierung an öffentlichen Projekten
+
+Neun öffentliche Projekte (Python-CLI, pandas-Report, Node-CLI, Flask mit Dockerfile, Express,
+PowerShell-Sammlung, Office-Makro-Beispiele, zwei absichtlich verwundbare Lern-Apps) liefen durch
+den Scanner. Übergreifende Fehlalarm-Muster, die daraus in die Policy kamen: GuardDog auf
+Top-Paketen, Checkov-Dockerfile-Hygiene, `*_exception`, olevba-Button-Handler und
+„Hex Strings“. Die verwundbaren Apps blockieren weiter (SQL-Injection, MD5-Passwörter, `yaml.load`,
+alte Pakete mit kritischen CVEs, Paket mit Netzwerkzugriff bei der Installation).

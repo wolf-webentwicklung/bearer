@@ -153,6 +153,8 @@ class Finding:
     package: str | None = None
     installed_version: str | None = None
     fixed_version: str | None = None
+    # trivy-image: the base image the CVE comes from (one Dockerfile can pull several).
+    image: str | None = None
 
     def __post_init__(self) -> None:
         self.excluded_from_score = _excluded_from_score(self.severity, self.category, self.file)
@@ -173,6 +175,7 @@ class Finding:
             "package": self.package,
             "installed_version": self.installed_version,
             "fixed_version": self.fixed_version,
+            "image": self.image,
         }
 
 
@@ -507,6 +510,7 @@ def _plain_summary(text: str, limit: int = 500) -> str:
 
 SEVERITY_POLICY_FILE = Path(__file__).resolve().parent / "severity_policy.json"
 _POLICY_MODES = {"set", "min"}
+_POLICY_TOOLS = {"bearer", "checkov"}
 
 
 def load_severity_policy(path: Path | None = None) -> list[dict[str, Any]]:
@@ -519,17 +523,18 @@ def load_severity_policy(path: Path | None = None) -> list[dict[str, Any]]:
     rules = json.loads(path.read_text(encoding="utf-8"))["rules"]
     for r in rules:
         if r.get("mode") not in _POLICY_MODES or r.get("severity") not in SEVERITY_ORDER \
-                or not r.get("match"):
+                or not r.get("match") or r.get("tool", "bearer") not in _POLICY_TOOLS:
             raise ValueError(f"invalid severity policy rule: {r!r}")
     return rules
 
 
 def apply_severity_policy(finding: Finding, rules: list[dict[str, Any]]) -> None:
-    """First matching rule wins. Only for bearer, never for secret/malware/unscannable."""
-    if finding.tool != "bearer" or finding.category in NEVER_EXCLUDED_CATEGORIES:
+    """First matching rule wins. A rule applies to the tool it names ("tool", default bearer);
+    only bearer and checkov findings are re-rated, never secret/malware/unscannable."""
+    if finding.tool not in _POLICY_TOOLS or finding.category in NEVER_EXCLUDED_CATEGORIES:
         return
     for r in rules:
-        if not fnmatch.fnmatchcase(finding.rule_id, r["match"]):
+        if r.get("tool", "bearer") != finding.tool or not fnmatch.fnmatchcase(finding.rule_id, r["match"]):
             continue
         target = r["severity"]
         if r["mode"] == "min" and SEVERITY_ORDER.index(finding.severity) <= SEVERITY_ORDER.index(target):
@@ -541,6 +546,106 @@ def apply_severity_policy(finding: Finding, rules: list[dict[str, Any]]) -> None
             finding.excluded_from_score = _excluded_from_score(
                 finding.severity, finding.category, finding.file)
         return
+
+
+_DEFAULT_BASE_IMAGE_POLICY = {
+    "severity": "low",
+    "keep_critical_with_fix": True,
+    "reason": "Lücke im Basis-Image, nicht im eigenen Code – Image bei Gelegenheit aktualisieren",
+}
+
+
+def load_base_image_policy(path: Path | None = None) -> dict[str, Any]:
+    """'base_image' section of severity_policy.json (see its _doc). {} when the policy is off."""
+    if os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY", "").strip().lower() in ("off", "0", "false"):
+        return {}
+    path = path or Path(os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY_FILE") or SEVERITY_POLICY_FILE)
+    section = json.loads(path.read_text(encoding="utf-8")).get("base_image")
+    if section is None:
+        return dict(_DEFAULT_BASE_IMAGE_POLICY)
+    if section.get("severity") not in SEVERITY_ORDER:
+        raise ValueError(f"invalid base_image policy: {section!r}")
+    return section
+
+
+def apply_base_image_policy(finding: Finding, policy: dict[str, Any]) -> None:
+    """Base-image CVEs (trivy-image) become hints: they sit in the OS packages of e.g.
+    python:3.x-slim, not in the uploaded code, and nearly every image has dozens. Only a
+    critical one that already has a fixed version keeps blocking - rebuilding fixes it."""
+    if not policy or finding.tool != "trivy-image":
+        return
+    if policy.get("keep_critical_with_fix", True) and finding.severity == "critical" \
+            and finding.fixed_version:
+        return
+    target = policy["severity"]
+    if SEVERITY_ORDER.index(finding.severity) >= SEVERITY_ORDER.index(target):
+        return  # already that mild or milder
+    finding.original_severity = finding.severity
+    finding.policy_reason = policy.get("reason") or None
+    finding.severity = target
+    finding.excluded_from_score = _excluded_from_score(finding.severity, finding.category, finding.file)
+
+
+# Bearer's *_code_injection also fires on setattr/getattr/delattr with a dynamic attribute
+# name - that sets/reads a field, it doesn't run code. eval/exec/compile stay critical.
+_ATTR_ACCESS_CALL = re.compile(r"\b(?:setattr|getattr|delattr)\s*\(")
+_CODE_EXEC_CALL = re.compile(r"\b(?:eval|exec|compile|__import__|execfile)\s*\(")
+ATTR_ACCESS_REASON = ("Dynamischer Attributzugriff (setattr/getattr) führt keinen Code aus – "
+                      "blockiert weiter, ist aber begründbar")
+
+
+def _source_line(target: Path, file: str | None, line: int | None) -> str | None:
+    if not file or not line or line < 1:
+        return None
+    root = target.resolve()
+    path = Path(file) if Path(file).is_absolute() else root / file
+    try:
+        path = path.resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+        with path.open(encoding="utf-8", errors="ignore") as fh:
+            for i, text in enumerate(fh, start=1):
+                if i == line:
+                    return text
+    except OSError:
+        return None
+    return None
+
+
+def refine_code_injection(findings: list[Finding], target: Path) -> None:
+    """Looks at the reported source line of each critical *_code_injection finding. A line
+    that only does setattr/getattr/delattr (and no eval/exec/compile) is lowered to high."""
+    for f in findings:
+        if f.tool != "bearer" or f.severity != "critical" \
+                or not fnmatch.fnmatchcase(f.rule_id, "*_code_injection"):
+            continue
+        text = _source_line(target, f.file, f.line)
+        if text is None or not _ATTR_ACCESS_CALL.search(text) or _CODE_EXEC_CALL.search(text):
+            continue
+        f.original_severity = f.original_severity or f.severity
+        f.policy_reason = ATTR_ACCESS_REASON
+        f.severity = "high"
+        f.excluded_from_score = _excluded_from_score(f.severity, f.category, f.file)
+
+
+def drop_duplicate_findings(findings: list[Finding]) -> list[Finding]:
+    """Identical findings only once: Bearer can report the same rule at the same line several
+    times (one per data flow), and trivy-image lists one CVE per affected OS package and per
+    FROM line of a multi-stage build. Keeps the first (most severe order is preserved)."""
+    seen: set[tuple] = set()
+    out: list[Finding] = []
+    for f in findings:
+        if f.tool == "trivy-image":
+            key = (f.tool, f.rule_id, f.image)
+        elif f.tool == "trivy":
+            key = (f.tool, f.rule_id, f.file, f.package)
+        else:
+            key = (f.tool, f.rule_id, f.file, f.line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
 
 
 def parse_bearer_json(data: dict[str, Any],
@@ -669,7 +774,10 @@ def scan_bearer(target: Path, tmp_json: Path,
         meta["error"] = f"could not parse bearer json: {e}"
         return findings, meta
 
-    findings = parse_bearer_json(data, policy) + scan_csharp_db_passwords(target)
+    findings = parse_bearer_json(data, policy)
+    if policy:
+        refine_code_injection(findings, target)
+    findings += scan_csharp_db_passwords(target)
     meta["severity_policy_applied"] = bool(policy)
     meta["severity_policy_changed"] = sum(1 for f in findings if f.original_severity)
     meta["finding_count"] = len(findings)
@@ -890,12 +998,14 @@ def _find_dockerfile_base_images(target: Path) -> list[str]:
     return sorted(images)
 
 
-def scan_trivy_docker_images(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+def scan_trivy_docker_images(target: Path, base_policy: dict[str, Any] | None = None
+                             ) -> tuple[list[Finding], dict[str, Any]]:
     """Scannt die in Dockerfiles referenzierten Base-Images auf bekannte CVEs.
     Baut NICHTS, zieht nur Metadaten/Layer der fertigen Basis-Images —
     kein beliebiger Code wird ausgeführt."""
     findings: list[Finding] = []
     meta = {"tool": "trivy-image", "ran": False, "error": None, "images_checked": []}
+    base_policy = load_base_image_policy() if base_policy is None else base_policy
 
     images = _find_dockerfile_base_images(target)
     if not images:
@@ -937,8 +1047,11 @@ def scan_trivy_docker_images(target: Path) -> tuple[list[Finding], dict[str, Any
                     category="dependency",
                     description=(vuln.get("Title") or vuln.get("Description") or "")[:500],
                     raw=vuln,
+                    image=image,
                     **_trivy_package_fields(vuln),
                 ))
+    for f in findings:
+        apply_base_image_policy(f, base_policy)
     meta["ran"] = True
     meta["finding_count"] = len(findings)
     return findings, meta
@@ -948,7 +1061,8 @@ def scan_trivy_docker_images(target: Path) -> tuple[list[Finding], dict[str, Any
 # Checkov (IaC)
 # ---------------------------------------------------------------------------
 
-def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+def scan_checkov(target: Path, policy: list[dict[str, Any]] | None = None
+                 ) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     meta = {"tool": "checkov", "ran": False, "error": None}
 
@@ -984,6 +1098,8 @@ def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
                 description=(failed.get("check_name") or "")[:500],
                 raw=failed,
             ))
+    for f in findings:
+        apply_severity_policy(f, policy or [])
     meta["finding_count"] = len(findings)
     return findings, meta
 
@@ -1076,6 +1192,68 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
             raw=item,
         ))
     return findings, None
+
+
+def _norm_package(ecosystem: str, name: str) -> str:
+    name = (name or "").strip().lower()
+    return re.sub(r"[-_.]+", "-", name) if ecosystem == "pypi" else name
+
+
+def _top_package_ranks(ecosystem: str) -> dict[str, int]:
+    """Download rank per package from the top-packages list GuardDog itself ships (and uses for
+    its typosquatting check). {} if the list can't be read - then nothing is downgraded."""
+    names = []
+    for base in (os.environ.get("GUARDDOG_TOP_PACKAGES_CACHE_LOCATION"), "/tmp/guarddog-cache"):
+        if not base:
+            continue
+        try:
+            names = json.loads((Path(base) / f"top_{ecosystem}_packages.json").read_text())["packages"]
+            break
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return {_norm_package(ecosystem, n): i for i, n in enumerate(names) if isinstance(n, str)}
+
+
+def load_guarddog_policy(path: Path | None = None) -> dict[str, Any]:
+    """'guarddog' section of severity_policy.json. {} when the policy is off."""
+    if os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY", "").strip().lower() in ("off", "0", "false"):
+        return {}
+    path = path or Path(os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY_FILE") or SEVERITY_POLICY_FILE)
+    section = json.loads(path.read_text(encoding="utf-8")).get("guarddog") or {}
+    if section and (section.get("severity") not in SEVERITY_ORDER
+                    or not isinstance(section.get("trusted_top_n"), int)):
+        raise ValueError(f"invalid guarddog policy: {section!r}")
+    return section
+
+
+def apply_guarddog_popularity(findings: list[Finding], policy: dict[str, Any],
+                              ranks: dict[str, dict[str, int]] | None = None) -> None:
+    """GuardDog's `verify` runs source-code heuristics over every dependency. On the most
+    downloaded packages (pandas, SQLAlchemy, PyYAML, @prisma/client ...) they fire all the time -
+    big code bases use obfuscation-like, network and filesystem patterns legitimately - and a
+    single one stopped the whole scan at the malware gate. A package within the top
+    `trusted_top_n` of the registry's download ranking becomes a hint. Typosquats of those
+    packages are by definition not on the list and keep blocking, as does everything else."""
+    top_n = policy.get("trusted_top_n") if policy else None
+    if not top_n:
+        return
+    ranks = ranks if ranks is not None else {}
+    for f in findings:
+        if f.tool != "guarddog" or f.category != "malware" or not f.file or ":" not in f.file:
+            continue
+        ecosystem, name = f.file.split(":", 1)
+        if ecosystem not in ranks:
+            ranks[ecosystem] = _top_package_ranks(ecosystem)
+        rank = ranks[ecosystem].get(_norm_package(ecosystem, name))
+        if rank is None or rank >= top_n:
+            continue
+        target = policy["severity"]
+        if SEVERITY_ORDER.index(f.severity) >= SEVERITY_ORDER.index(target):
+            continue
+        f.original_severity = f.severity
+        f.policy_reason = policy.get("reason") or None
+        f.severity = target
+        f.excluded_from_score = _excluded_from_score(f.severity, f.category, f.file)
 
 
 # Control manifests with one well-known, harmless package each. If guarddog fails on the upload's
@@ -1237,11 +1415,19 @@ def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
     """None bedeutet: kein eigenes Finding (z.B. IOC — zu rauschanfällig,
     siehe unten)."""
     if keyword_type == "AutoExec":
+        # olevba zählt auch Button-Handler (CommandButton1_Click) zu AutoExec – die laufen
+        # erst, wenn jemand klickt, und stecken in fast jedem Business-Makro mit Knöpfen.
+        # Andere Steuerelement-Ereignisse (_Layout, _Painted, _GotFocus …) bleiben high: die
+        # feuern teils von selbst und werden von Schad-Makros genau dafür benutzt.
+        if re.search(r"_(Dbl)?Click$", keyword or "", re.IGNORECASE):
+            return "low"
         return "high"  # Makro läuft automatisch beim Öffnen — an sich schon
         # ein Warnsignal in einem "Dashboard mit echten Daten", das i.d.R.
         # gar keine Makros braucht.
     if keyword_type == "Suspicious":
         kw = (keyword or "").strip().lower()
+        if kw in ("hex strings", "base64 strings"):
+            return "low"  # olevba's summary line for encoded strings - same as "Hex String"
         if kw in _OLEVBA_CRITICAL_KEYWORDS:
             return "critical"
         if kw in _OLEVBA_HIGH_KEYWORDS:
@@ -1583,6 +1769,8 @@ def main() -> int:
 
         print("[0/7] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
         malware_findings, m = scan_guarddog(target)
+        if not args.no_severity_policy:
+            apply_guarddog_popularity(malware_findings, load_guarddog_policy())
         _relativize_findings(malware_findings, target)
         tool_meta["guarddog"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
@@ -1639,14 +1827,14 @@ def main() -> int:
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
         print("[4/7] trivy (Docker-Base-Image-CVEs, falls Dockerfile vorhanden)...")
-        f, m = scan_trivy_docker_images(target)
+        f, m = scan_trivy_docker_images(target, {} if args.no_severity_policy else None)
         all_findings += f
         tool_meta["trivy_docker_images"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" [images: {', '.join(m.get('images_checked', [])) or '-'}]"))
 
         print("[5/7] checkov (IaC)...")
-        f, m = scan_checkov(target)
+        f, m = scan_checkov(target, policy)
         all_findings += f
         tool_meta["checkov"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
@@ -1662,7 +1850,7 @@ def main() -> int:
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
         _relativize_findings(all_findings, target)
-        all_findings = drop_secret_duplicates(all_findings)
+        all_findings = drop_duplicate_findings(drop_secret_duplicates(all_findings))
         criticality = compute_criticality(all_findings)
 
         combined = {
