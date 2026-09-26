@@ -346,6 +346,16 @@ path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz
   `setattr`/`getattr`/`delattr` aufruft (und kein `eval`/`exec`/`compile`), wird er high
   (begründbar) – ein dynamischer Attributname setzt ein Feld, er führt keinen Code aus. Das
   steckt in `refine_code_injection()`, nicht in der JSON-Datei, weil es die Quellzeile liest
+- **Checkov-Hygiene (nur Hinweis):** Dockerfile-/Workflow-Checks ohne Sicherheitslücke im Code
+  (`CKV_DOCKER_2/3/4/5/7/9` – HEALTHCHECK, USER, ADD, apt, `latest`; `CKV2_GHA_1`, `CKV_GHA_7`).
+  Regeln mit `"tool": "checkov"` gelten nur für Checkov, alle anderen nur für Bearer
+- **GuardDog auf weit verbreiteten Paketen (`guarddog`-Abschnitt):** GuardDogs Code-Heuristiken
+  schlagen bei großen, beliebten Paketen (pandas, SQLAlchemy, PyYAML, Jinja2, `@prisma/client` …)
+  ständig an und haben den ganzen Scan am Malware-Gate gestoppt. Ein Paket unter den
+  `trusted_top_n` (5000) meistgeladenen der Registry – laut GuardDogs eigener
+  `top_<ökosystem>_packages.json` – wird zum Hinweis. Typosquats dieser Pakete stehen per
+  Definition nicht auf der Liste und blockieren weiter, ebenso jedes andere Paket. Fehlt die
+  Liste, wird nichts herabgestuft
 - **nicht gelistete Regeln** behalten Bearers Schweregrad
 
 Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die

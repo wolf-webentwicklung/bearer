@@ -510,6 +510,7 @@ def _plain_summary(text: str, limit: int = 500) -> str:
 
 SEVERITY_POLICY_FILE = Path(__file__).resolve().parent / "severity_policy.json"
 _POLICY_MODES = {"set", "min"}
+_POLICY_TOOLS = {"bearer", "checkov"}
 
 
 def load_severity_policy(path: Path | None = None) -> list[dict[str, Any]]:
@@ -522,17 +523,18 @@ def load_severity_policy(path: Path | None = None) -> list[dict[str, Any]]:
     rules = json.loads(path.read_text(encoding="utf-8"))["rules"]
     for r in rules:
         if r.get("mode") not in _POLICY_MODES or r.get("severity") not in SEVERITY_ORDER \
-                or not r.get("match"):
+                or not r.get("match") or r.get("tool", "bearer") not in _POLICY_TOOLS:
             raise ValueError(f"invalid severity policy rule: {r!r}")
     return rules
 
 
 def apply_severity_policy(finding: Finding, rules: list[dict[str, Any]]) -> None:
-    """First matching rule wins. Only for bearer, never for secret/malware/unscannable."""
-    if finding.tool != "bearer" or finding.category in NEVER_EXCLUDED_CATEGORIES:
+    """First matching rule wins. A rule applies to the tool it names ("tool", default bearer);
+    only bearer and checkov findings are re-rated, never secret/malware/unscannable."""
+    if finding.tool not in _POLICY_TOOLS or finding.category in NEVER_EXCLUDED_CATEGORIES:
         return
     for r in rules:
-        if not fnmatch.fnmatchcase(finding.rule_id, r["match"]):
+        if r.get("tool", "bearer") != finding.tool or not fnmatch.fnmatchcase(finding.rule_id, r["match"]):
             continue
         target = r["severity"]
         if r["mode"] == "min" and SEVERITY_ORDER.index(finding.severity) <= SEVERITY_ORDER.index(target):
@@ -1059,7 +1061,8 @@ def scan_trivy_docker_images(target: Path, base_policy: dict[str, Any] | None = 
 # Checkov (IaC)
 # ---------------------------------------------------------------------------
 
-def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+def scan_checkov(target: Path, policy: list[dict[str, Any]] | None = None
+                 ) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     meta = {"tool": "checkov", "ran": False, "error": None}
 
@@ -1095,6 +1098,8 @@ def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
                 description=(failed.get("check_name") or "")[:500],
                 raw=failed,
             ))
+    for f in findings:
+        apply_severity_policy(f, policy or [])
     meta["finding_count"] = len(findings)
     return findings, meta
 
@@ -1187,6 +1192,68 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
             raw=item,
         ))
     return findings, None
+
+
+def _norm_package(ecosystem: str, name: str) -> str:
+    name = (name or "").strip().lower()
+    return re.sub(r"[-_.]+", "-", name) if ecosystem == "pypi" else name
+
+
+def _top_package_ranks(ecosystem: str) -> dict[str, int]:
+    """Download rank per package from the top-packages list GuardDog itself ships (and uses for
+    its typosquatting check). {} if the list can't be read - then nothing is downgraded."""
+    names = []
+    for base in (os.environ.get("GUARDDOG_TOP_PACKAGES_CACHE_LOCATION"), "/tmp/guarddog-cache"):
+        if not base:
+            continue
+        try:
+            names = json.loads((Path(base) / f"top_{ecosystem}_packages.json").read_text())["packages"]
+            break
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return {_norm_package(ecosystem, n): i for i, n in enumerate(names) if isinstance(n, str)}
+
+
+def load_guarddog_policy(path: Path | None = None) -> dict[str, Any]:
+    """'guarddog' section of severity_policy.json. {} when the policy is off."""
+    if os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY", "").strip().lower() in ("off", "0", "false"):
+        return {}
+    path = path or Path(os.environ.get("UNIFIED_SCAN_SEVERITY_POLICY_FILE") or SEVERITY_POLICY_FILE)
+    section = json.loads(path.read_text(encoding="utf-8")).get("guarddog") or {}
+    if section and (section.get("severity") not in SEVERITY_ORDER
+                    or not isinstance(section.get("trusted_top_n"), int)):
+        raise ValueError(f"invalid guarddog policy: {section!r}")
+    return section
+
+
+def apply_guarddog_popularity(findings: list[Finding], policy: dict[str, Any],
+                              ranks: dict[str, dict[str, int]] | None = None) -> None:
+    """GuardDog's `verify` runs source-code heuristics over every dependency. On the most
+    downloaded packages (pandas, SQLAlchemy, PyYAML, @prisma/client ...) they fire all the time -
+    big code bases use obfuscation-like, network and filesystem patterns legitimately - and a
+    single one stopped the whole scan at the malware gate. A package within the top
+    `trusted_top_n` of the registry's download ranking becomes a hint. Typosquats of those
+    packages are by definition not on the list and keep blocking, as does everything else."""
+    top_n = policy.get("trusted_top_n") if policy else None
+    if not top_n:
+        return
+    ranks = ranks if ranks is not None else {}
+    for f in findings:
+        if f.tool != "guarddog" or f.category != "malware" or not f.file or ":" not in f.file:
+            continue
+        ecosystem, name = f.file.split(":", 1)
+        if ecosystem not in ranks:
+            ranks[ecosystem] = _top_package_ranks(ecosystem)
+        rank = ranks[ecosystem].get(_norm_package(ecosystem, name))
+        if rank is None or rank >= top_n:
+            continue
+        target = policy["severity"]
+        if SEVERITY_ORDER.index(f.severity) >= SEVERITY_ORDER.index(target):
+            continue
+        f.original_severity = f.severity
+        f.policy_reason = policy.get("reason") or None
+        f.severity = target
+        f.excluded_from_score = _excluded_from_score(f.severity, f.category, f.file)
 
 
 # Control manifests with one well-known, harmless package each. If guarddog fails on the upload's
@@ -1694,6 +1761,8 @@ def main() -> int:
 
         print("[0/7] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
         malware_findings, m = scan_guarddog(target)
+        if not args.no_severity_policy:
+            apply_guarddog_popularity(malware_findings, load_guarddog_policy())
         _relativize_findings(malware_findings, target)
         tool_meta["guarddog"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
@@ -1757,7 +1826,7 @@ def main() -> int:
               + (f" [images: {', '.join(m.get('images_checked', [])) or '-'}]"))
 
         print("[5/7] checkov (IaC)...")
-        f, m = scan_checkov(target)
+        f, m = scan_checkov(target, policy)
         all_findings += f
         tool_meta["checkov"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"

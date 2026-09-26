@@ -9,7 +9,9 @@
     "Blocking in gvintra: critical/high/medium block (high/medium can be justified per finding), low/info are hints only.",
     "Disable for comparison: --no-severity-policy or UNIFIED_SCAN_SEVERITY_POLICY=off. Other file: UNIFIED_SCAN_SEVERITY_POLICY_FILE=/path.json",
     "'base_image': CVEs found by trivy-image in the base image of a Dockerfile (OS packages of e.g. python:3.x-slim, not the uploaded code) become 'severity' (a hint). Exception with keep_critical_with_fix: a critical CVE that already has a fixed version keeps blocking - rebuilding the image fixes it.",
-    "Line check in unified_scan.py (not configurable here): a critical *_code_injection finding whose source line only calls setattr/getattr/delattr (no eval/exec/compile) is lowered to high."
+    "Line check in unified_scan.py (not configurable here): a critical *_code_injection finding whose source line only calls setattr/getattr/delattr (no eval/exec/compile) is lowered to high.",
+    "Rules may name a 'tool' (default 'bearer'); only 'bearer' and 'checkov' findings are re-rated by 'rules'.",
+    "'guarddog': a GuardDog finding on a package within the top 'trusted_top_n' of the registry's download ranking (GuardDog's own top_<ecosystem>_packages.json) becomes 'severity'. Its source-code heuristics fire constantly on big popular packages; typosquats are not on the list and keep blocking."
   ],
   "rules": [
     {
@@ -233,11 +235,72 @@
       "mode": "set",
       "severity": "low",
       "reason": "Web-Einstellung – bei internen Tools nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_2",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_3",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_4",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_5",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_7",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_DOCKER_9",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV2_GHA_1",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
+    },
+    {
+      "tool": "checkov",
+      "match": "CKV_GHA_7",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Dockerfile-/Workflow-Hygiene, keine Lücke im Code – nur Hinweis"
     }
   ],
   "base_image": {
     "severity": "low",
     "keep_critical_with_fix": true,
     "reason": "Lücke im Basis-Image, nicht im eigenen Code – Image bei Gelegenheit aktualisieren"
+  },
+  "guarddog": {
+    "trusted_top_n": 5000,
+    "severity": "low",
+    "reason": "Weit verbreitetes Paket (Top 5000 der Registry) – GuardDogs Code-Muster sind hier fast immer Fehlalarme"
   }
 }

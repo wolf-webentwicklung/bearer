@@ -161,3 +161,78 @@ def test_line_outside_target_or_missing_file_stays_critical(tmp_path):
     findings = parse_bearer_json(data, load_severity_policy())
     refine_code_injection(findings, tmp_path)
     assert findings[0].severity == "critical"
+
+
+# --- GuardDog on popular packages ----------------------------------------------------------
+
+from unified_scan import apply_guarddog_popularity, apply_severity_policy, load_guarddog_policy  # noqa: E402
+
+RANKS = {"pypi": {"pyyaml": 13, "pandas": 38, "grequests": 6926},
+         "npm": {"@prisma/client": 1965}}
+
+
+def _gd(pkg, sev="critical", eco="pypi"):
+    return Finding(tool="guarddog", severity=sev, rule_id="threat-runtime-obfuscation-general",
+                   title="t", file=f"{eco}:{pkg}", category="malware")
+
+
+@pytest.mark.parametrize("pkg,eco,expected", [
+    ("PyYAML", "pypi", "low"),          # name normalised (PEP 503)
+    ("pandas", "pypi", "low"),
+    ("@prisma/client", "npm", "low"),
+    ("grequests", "pypi", "critical"),  # rank 6926 > 5000: stays
+    ("reqeusts", "pypi", "critical"),   # typosquat: not on the list, stays
+    ("left-pad", "npm", "critical"),
+])
+def test_guarddog_popular_packages_become_hints(pkg, eco, expected):
+    f = _gd(pkg, eco=eco)
+    apply_guarddog_popularity([f], load_guarddog_policy(), ranks=RANKS)
+    assert f.severity == expected
+    if expected == "low":
+        assert f.original_severity == "critical" and "Top 5000" in f.policy_reason
+
+
+def test_guarddog_unscannable_and_off_untouched(monkeypatch):
+    f = Finding(tool="guarddog", severity="critical", rule_id="unscannable.manifest", title="t",
+                file="pypi:pandas", category="unscannable")
+    apply_guarddog_popularity([f], load_guarddog_policy(), ranks=RANKS)
+    assert f.severity == "critical"
+    monkeypatch.setenv("UNIFIED_SCAN_SEVERITY_POLICY", "off")
+    g = _gd("pandas")
+    apply_guarddog_popularity([g], load_guarddog_policy(), ranks=RANKS)
+    assert g.severity == "critical"
+
+
+def test_guarddog_missing_top_list_downgrades_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("GUARDDOG_TOP_PACKAGES_CACHE_LOCATION", str(tmp_path))
+    monkeypatch.setattr(unified_scan, "_top_package_ranks", lambda eco: {})
+    f = _gd("pandas")
+    apply_guarddog_popularity([f], load_guarddog_policy())
+    assert f.severity == "critical"
+
+
+def test_top_package_ranks_reads_guarddog_list(monkeypatch, tmp_path):
+    (tmp_path / "top_pypi_packages.json").write_text(json.dumps({"packages": ["boto3", "Py_YAML"]}))
+    monkeypatch.setenv("GUARDDOG_TOP_PACKAGES_CACHE_LOCATION", str(tmp_path))
+    assert unified_scan._top_package_ranks("pypi") == {"boto3": 0, "py-yaml": 1}
+
+
+# --- checkov hygiene rules --------------------------------------------------------------
+
+@pytest.mark.parametrize("check,expected", [
+    ("CKV_DOCKER_2", "low"), ("CKV_DOCKER_3", "low"), ("CKV2_GHA_1", "low"),
+    ("CKV_DOCKER_1", "medium"),   # exposed SSH port: not hygiene, keeps its severity
+    ("CKV_AWS_20", "medium"),
+])
+def test_checkov_hygiene_checks_become_hints(check, expected):
+    f = Finding(tool="checkov", severity="medium", rule_id=check, title="t",
+                file="Dockerfile", line=1, category="iac")
+    apply_severity_policy(f, load_severity_policy())
+    assert f.severity == expected
+
+
+def test_bearer_rule_does_not_hit_checkov_and_vice_versa():
+    rules = [{"match": "*", "mode": "set", "severity": "low"}]  # tool defaults to bearer
+    f = Finding(tool="checkov", severity="medium", rule_id="CKV_X", title="t", category="iac")
+    apply_severity_policy(f, rules)
+    assert f.severity == "medium"
