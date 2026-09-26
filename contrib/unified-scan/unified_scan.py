@@ -343,9 +343,57 @@ def resolve_target(target_arg: str) -> tuple[Path, tempfile.TemporaryDirectory |
 # Bearer (SAST + Privacy)
 # ---------------------------------------------------------------------------
 
+# Bearer without rules still exits normally and writes an (empty) report - which would read as
+# "no findings". Happens e.g. when BEARER_DISABLE_VERSION_CHECK=true also stops the default-rule
+# download. Such a run must surface as tools.bearer.error, never as a clean result.
+_BEARER_NO_RULES = re.compile(
+    r"\b0 rules found\b|zero rules found|loading rules failed|default rules could not be downloaded",
+    re.IGNORECASE,
+)
+
+
+def _bearer_rules_missing() -> str | None:
+    """Pre-flight: default rules disabled but no usable external rule dir -> bearer checks nothing."""
+    if os.environ.get("BEARER_DISABLE_DEFAULT_RULES", "").strip().lower() not in ("1", "true", "yes"):
+        return None
+    rule_dir = os.environ.get("BEARER_EXTERNAL_RULE_DIR", "").strip()
+    if not rule_dir or not Path(rule_dir).is_dir():
+        return f"bearer: default rules disabled and external rule dir missing ({rule_dir or 'unset'})"
+    if not any(Path(rule_dir).rglob("*.yml")):
+        return f"bearer: default rules disabled and no rules in {rule_dir}"
+    return None
+
+
+def _plain_summary(text: str, limit: int = 500) -> str:
+    """First paragraph of a Markdown description as plain text (Bearer ships long Markdown docs
+    per rule; the employee report only needs the gist - the full text stays in raw)."""
+    if not text:
+        return ""
+    body = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", body):
+        block = block.strip()
+        if not block or block.startswith("#"):
+            continue
+        paragraphs.append(block)
+        break
+    summary = paragraphs[0] if paragraphs else body.strip()
+    summary = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", summary)   # links/images -> text
+    summary = re.sub(r"`([^`]*)`", r"\1", summary)                  # inline code
+    summary = re.sub(r"(\*\*|__|\*|_)(\S.*?\S|\S)\1", r"\2", summary)  # bold/italic
+    summary = re.sub(r"^\s*[-*+]\s+", "", summary, flags=re.MULTILINE)
+    summary = re.sub(r"\s+", " ", summary).strip()
+    return summary[:limit]
+
+
 def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     meta = {"tool": "bearer", "ran": False, "error": None}
+
+    missing = _bearer_rules_missing()
+    if missing:
+        meta["error"] = missing
+        return findings, meta
 
     ok, out, err = run_tool(
         "bearer",
@@ -356,6 +404,11 @@ def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, 
     meta["ran"] = ok
     if not ok:
         meta["error"] = err
+        return findings, meta
+
+    no_rules = _BEARER_NO_RULES.search(f"{out}\n{err}")
+    if no_rules:
+        meta["error"] = f"bearer ran without rules ({no_rules.group(0)}) - nothing was checked"
         return findings, meta
 
     if not tmp_json.exists():
@@ -385,7 +438,7 @@ def scan_bearer(target: Path, tmp_json: Path) -> tuple[list[Finding], dict[str, 
                 category="privacy" if "lang_" not in (item.get("rule_id") or "") and
                           any(k in (item.get("id") or "") for k in ("pii", "phi", "data"))
                           else "security",
-                description=(item.get("description") or "")[:500],
+                description=_plain_summary(item.get("description") or ""),
                 raw=item,
             ))
     meta["finding_count"] = len(findings)
@@ -446,14 +499,16 @@ def _parse_trufflehog_ndjson(out: str, git_mode: bool) -> list[Finding]:
     return findings
 
 
+# --no-verification: never send found credentials to their providers (AWS, GitHub, ...) to test
+# them live - a real leaked key would leave the machine for that. Findings stay pattern-based.
 def scan_trufflehog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     meta = {"tool": "trufflehog", "ran": False, "error": None}
     git_mode = is_git_repo(target)
 
     if git_mode:
-        cmd = ["trufflehog", "git", f"file://{target}", "--json", "--no-update"]
+        cmd = ["trufflehog", "git", f"file://{target}", "--json", "--no-update", "--no-verification"]
     else:
-        cmd = ["trufflehog", "filesystem", str(target), "--json", "--no-update"]
+        cmd = ["trufflehog", "filesystem", str(target), "--json", "--no-update", "--no-verification"]
 
     ok, out, err = run_tool("trufflehog", cmd, cwd=target)
     meta["ran"] = ok
@@ -661,6 +716,24 @@ _GUARDDOG_RISK_SEVERITY = {
 }
 
 
+def _guarddog_risk_text(risk: Any) -> str:
+    """One readable line per GuardDog risk. guarddog 3.x risk objects carry the text in
+    threat_/capability_description and the place in *_location; the matched code snippet
+    (often escaped bytes) is deliberately left out - it stays in raw."""
+    if not isinstance(risk, dict):
+        return str(risk)[:200]
+    text = (risk.get("message") or risk.get("threat_description")
+            or risk.get("capability_description") or risk.get("name") or "auffälliges Muster")
+    where = risk.get("threat_location") or risk.get("capability_location") or risk.get("location")
+    sev = risk.get("severity")
+    out = str(text)
+    if where:
+        out += f" ({where})"
+    if sev:
+        out += f" [{sev}]"
+    return out
+
+
 def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str | None]:
     """Gibt (findings, parse_error_oder_None) zurück. Ein Parse-Fehler wird
     NICHT stillschweigend verschluckt — bei einem Malware-GATE muss ein
@@ -691,7 +764,8 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
         if label == "no_risks_detected" and not risks:
             continue  # kein Finding nötig, Paket unauffällig
 
-        rule_ids = [r.get("rule_id") or r.get("code") for r in risks if isinstance(r, dict)]
+        rule_ids = [r.get("rule_id") or r.get("threat_rule") or r.get("capability_rule")
+                    or r.get("name") for r in risks if isinstance(r, dict)]
         rule_id = ", ".join(sorted(set(filter(None, rule_ids)))) or f"guarddog.{label}"
         findings.append(Finding(
             tool="guarddog",
@@ -704,8 +778,7 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
             line=None,
             category="malware",
             description=(f"GuardDog-Score {risk.get('score', 0)}. "
-                         + "; ".join(str(r.get('message', r)) if isinstance(r, dict) else str(r)
-                                     for r in risks[:5])
+                         + "; ".join(_guarddog_risk_text(r) for r in risks[:5])
                          )[:800],
             raw=item,
         ))

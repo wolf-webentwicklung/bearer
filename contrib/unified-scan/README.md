@@ -183,9 +183,33 @@ docker run -d --name unified-scan --network scan \
   unified-scan
 ```
 
-Das Image enthält bearer, trufflehog, trivy, checkov und guarddog in
-festen Versionen (Build-Args im `Dockerfile`), läuft als Nutzer ohne
-Root-Rechte und schreibt nur nach `/tmp`.
+Das Image enthält bearer (mit eingebauten bearer-rules), trufflehog,
+trivy, checkov, guarddog und oletools/olevba in festen Versionen
+(Build-Args im `Dockerfile`), läuft als Nutzer ohne Root-Rechte und
+schreibt nur nach `/tmp`.
+
+**Was im Image für ein schreibgeschütztes Dateisystem und ohne
+Telefon-nach-Hause eingestellt ist:**
+- **Bearer-Regeln eingebaut** (`BEARER_RULES_VERSION`, liegen unter
+  `/opt/bearer-rules`, `BEARER_EXTERNAL_RULE_DIR` +
+  `BEARER_DISABLE_DEFAULT_RULES=true`). Hintergrund:
+  `BEARER_DISABLE_VERSION_CHECK=true` schaltet auch den Download der
+  Standard-Regeln ab. Bearer lief dann mit „0 rules found" und lieferte
+  einen leeren Report, der wie „keine Findings" aussah. `unified_scan.py`
+  meldet einen Lauf ohne Regeln jetzt als `tools.bearer.error` (also
+  `incomplete`), nie als sauberes Ergebnis.
+- **GuardDog-Cache nach `/tmp`** (`GUARDDOG_TOP_PACKAGES_CACHE_LOCATION`):
+  GuardDog schreibt seine Top-Paket-Listen sonst ins eigene
+  Paketverzeichnis und stürzt bei schreibgeschütztem Dateisystem ab. Das
+  `entrypoint.sh` füllt den Cache beim Start mit den mitgelieferten Listen.
+- **trufflehog mit `--no-verification`:** Gefundene Schlüssel werden nicht
+  live beim Anbieter (AWS, GitHub, …) getestet. Sonst würde ein echter,
+  geleakter Schlüssel dafür die Maschine verlassen.
+- Telemetrie aus: `TRIVY_DISABLE_TELEMETRY`, `DO_NOT_TRACK`,
+  `BC_SKIP_MAPPING` (checkov).
+
+**Regelmäßig neu bauen (z.B. wöchentlich):** trivy-Datenbank und
+Bearer-Regeln stecken im Image und veralten sonst.
 
 Größen: checkov und guarddog (semgrep) brauchen jeweils mehrere hundert MB
 RAM. Ein tmpfs zählt zum Speicherlimit des Containers. Deshalb eher 3 GB
@@ -205,10 +229,23 @@ trivy sie stattdessen zur Laufzeit, das braucht ebenfalls Internet.
 Möglichkeiten:
 - **Kein Internet:** maximale Abschottung, dafür ohne GuardDog und
   Base-Image-Scan.
-- **Ausgang nur über einen Proxy mit Allowlist:** `pypi.org`,
-  `files.pythonhosted.org`, `registry.npmjs.org` und die nötigen
-  Registries, gesetzt über `HTTPS_PROXY`. Der Container darf interne
-  Dienste (DB, App) trotzdem nicht erreichen.
+- **Ausgang nur über einen Proxy mit Allowlist** (empfohlen), gesetzt über
+  `HTTPS_PROXY`. Der Container darf interne Dienste (DB, App) trotzdem
+  nicht erreichen. Nur `CONNECT` auf Port 443 zu diesen Hosts, private
+  Zieladressen gesperrt (erprobte squid-Liste):
+
+  | Zweck | Hosts |
+  |---|---|
+  | GuardDog: Pakete | `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org` |
+  | GuardDog: PyPI-Top-Liste (Typosquatting) | `hugovk.github.io`, `hugovk.dev` |
+  | trivy-DB (nur mit `TRIVY_BAKE_DB=0`) | `ghcr.io`, `pkg-containers.githubusercontent.com`, `mirror.gcr.io` |
+  | `trivy image` (Base-Images) | `registry-1.docker.io`, `auth.docker.io`, `index.docker.io`, `production.cloudflare.docker.com`, `quay.io`, `cdn01.quay.io`, `cdn02.quay.io`, `cdn03.quay.io` |
+
+  Bewusst **nicht** freigegeben: `api.github.com`, `check.trivy.dev`,
+  `api.cycode.com` (Versions-Checks/Telemetrie), `github.com` und
+  `packages.ecosyste.ms` (GuardDogs Abgleich mit Quell-Repo/Metadaten —
+  schwächt nur diese eine Heuristik, `github.com` wäre aber ein möglicher
+  Abflusskanal).
 
 ## Sprachgrenze von Bearer
 
