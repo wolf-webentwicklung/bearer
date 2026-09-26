@@ -73,8 +73,11 @@ Das Script ist nicht auf GitHub oder auf Git überhaupt festgelegt:
   Versionskontrolle war. Läuft genauso, nur `trufflehog` scannt dann nur
   den aktuellen Dateistand (kein History-Scan möglich, logisch, da keine
   History existiert).
-- **Lokaler Ordner, ist ein Git-Repo** — `trufflehog` scannt automatisch
-  die komplette Git-History mit, nicht nur den aktuellen Stand.
+- **Lokaler Ordner, ist ein Git-Repo** — `trufflehog` scannt immer den
+  aktuellen Dateistand und zusätzlich die komplette Git-History. Die History
+  wird nur gescannt, wenn im Wurzelordner ein gültiges `.git` mit Commits
+  liegt; ein kaputtes oder leeres `.git` (z.B. in einem Archiv) ändert
+  nichts am Dateistand-Scan.
 - **Git-URL** (`https://`, `git@`, `ssh://`) — GitHub, GitLab (auch
   selbstgehostet), Bitbucket, jeder Git-Host. Wird automatisch in ein
   Temp-Verzeichnis geklont, gescannt, danach automatisch aufgeräumt.
@@ -321,20 +324,65 @@ Erzeugt in `./report/`:
 Exit-Code `1` wenn mindestens ein `critical`-Finding vorliegt (CI-tauglich),
 sonst `0`.
 
-## Test-/Beispielcode-Filter
+## Test-Code-Filter
 
-Findings in Pfaden wie `test/`, `tests/`, `__tests__/`, `spec/`,
-`fixtures/`, `vendor/`, `node_modules/`, `examples/`, `demo/`, `dist/`,
-`build/` etc. verzerren die Kritikalitäts-Einschätzung nach oben, obwohl es
-kein Code ist, der live läuft (z.B. absichtlich unsichere Übungs-Snippets
-in Test-Repos). Diese Findings werden im Mitarbeiter-Report weiter
-angezeigt (mit 🧪 markiert), fließen aber nicht in `internal_criticality`
-ein. Die Pfad-Liste steht zentral in `NOISE_PATH_PATTERNS` im Script und
-ist dort anpassbar.
+Findings in echten Test-Pfaden (`test/`, `tests/`, `__tests__/`, `spec/`,
+`fixtures/`, `testdata/` sowie Dateien wie `test_*.py`, `*_test.py`,
+`*_test.go`, `*.test.ts`, `*.spec.js`, `*_spec.rb`) werden im
+Mitarbeiter-Report weiter angezeigt (mit 🧪 markiert), fließen aber nicht in
+`internal_criticality` ein (`excluded_from_score: true`). Die Liste steht in
+`NOISE_PATH_PATTERNS` / `_NOISE_FILE_PATTERN`.
+
+Bewusst **nicht** mehr ausgeschlossen: `build/`, `dist/`, `vendor/`,
+`node_modules/`, `examples/`, `demo/`, `.venv/` usw. Das ist oft genau der
+Code, der ausgeliefert wird, und ein Ordnername ist vom Uploader frei
+wählbar — er darf keine Funde abschalten.
+
+**Nie ausgeschlossen**, auch in Test-Pfaden: Schweregrad `critical` und die
+Kategorien `secret`, `malware`, `malicious-package` und `unscannable`.
 
 Hinweis: Bearer filtert Test-Pfade oft schon selbst intern raus, bevor
 Findings überhaupt bei uns ankommen — der Filter hier greift zusätzlich
 für Tools wie Checkov, die das nicht selbst tun.
+
+## Exit-Codes der Tools
+
+Alle Tools werden so aufgerufen, dass sie auch mit Funden mit 0 enden
+(`bearer --exit-code 0`, `checkov --soft-fail`; trufflehog, trivy und
+guarddog ohne `--fail`/`--exit-code`). Ein anderer Exit-Code ist deshalb ein
+echter Fehler und landet unter `tools.<name>.error` (→ `incomplete: true` im
+HTTP-Wrapper) statt als leeres, "sauberes" Ergebnis. Einzige Ausnahme:
+olevba liefert auch bei einem Absturz (z.B. Exit 8) JSON mit Details, das
+ausgewertet wird.
+
+## Nicht prüfbare Inhalte (Kategorie `unscannable`)
+
+Manche Inhalte kann die Pipeline nicht (vollständig) prüfen. Statt sie still
+als "keine Funde" durchgehen zu lassen, entsteht ein `critical`-Fund mit
+Kategorie `unscannable` (nie aus dem Score ausgeschlossen):
+
+| `rule_id` | `tool` | Wann |
+|---|---|---|
+| `nested-archive` | `unified-scan` | Archiv im Archiv (`.zip`, `.7z`, `.tar`, `.gz`, `.rar`, `.jar`, `.apk` …), erkannt an Endung **und** Magic Bytes (also auch umbenannt). Nur trufflehog schaut hinein, alle anderen Tools nicht. Office-/ODF-Dokumente zählen nicht dazu. |
+| `unscannable.manifest` | `guarddog` | `package.json` ist kein gültiges JSON, oder guarddog scheitert an einer Abhängigkeitsliste (`requirements*.txt`, `package.json`), während ein Kontrolllauf mit einer bekannten, harmlosen Liste (`six` / `left-pad`) klappt. |
+| `unscannable.office-file` | `olevba` | olevba kann eine Office-Datei nicht analysieren (Absturz, verschlüsselt, Timeout, keine Ausgabe). |
+
+Scheitert auch der Kontrolllauf, liegt es an Netzwerk/Proxy/Registry, also
+an der Infrastruktur: das landet nur unter `tools.guarddog.ecosystem_errors`
+(Hinweis "teilweise nicht geprüft", blockiert nicht). Entschieden wird über
+das Verhalten, nicht über den Fehlertext — der kann Inhalt der hochgeladenen
+Liste enthalten und wäre damit vom Uploader steuerbar. Das Malware-Gate stoppt die Pipeline nur bei echten
+Malware-Funden (Kategorie `malware`), nicht bei `unscannable`.
+
+olevba wählt Dateien nicht nur nach Endung aus, sondern auch nach Inhalt:
+OLE-Container (`D0 CF 11 E0`) und OOXML-ZIPs mit `vbaProject.bin` werden
+auch als `.bin`/`.dat`/… geprüft.
+
+## Priorität im HTTP-Wrapper
+
+Der Wrapper startet jeden Scan mit `nice -n 10` und, falls vorhanden,
+`ionice -c 3`, damit ein langer Scan andere Dienste auf demselben Host nicht
+ausbremst.
 
 ## Docker-Base-Image-Scan
 

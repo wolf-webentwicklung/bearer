@@ -76,9 +76,10 @@ def test_trufflehog_never_verifies_live(tmp_path, monkeypatch):
     monkeypatch.setattr(unified_scan, 'run_tool', lambda name, cmd, cwd, timeout=900:
                         (cmds.append(cmd), (True, '', ''))[1])
     for git_mode in (False, True):
-        monkeypatch.setattr(unified_scan, 'is_git_repo', lambda p, g=git_mode: g)
+        monkeypatch.setattr(unified_scan, '_has_git_history', lambda p, g=git_mode: g)
         unified_scan.scan_trufflehog(tmp_path)
-    assert len(cmds) == 2 and all('--no-verification' in c for c in cmds)
+    # filesystem, then filesystem + git history
+    assert len(cmds) == 3 and all('--no-verification' in c for c in cmds)
 
 
 def test_guarddog_3x_risk_objects_are_readable():
