@@ -1779,28 +1779,18 @@ def main() -> int:
         malware_findings = nested_findings + malware_findings
         malware_critical = [f for f in malware_findings
                             if f.severity == "critical" and f.category == "malware"]
+        gate_passed = not malware_critical
         if malware_critical:
+            # The gate still fails (report gate_passed=false, exit 1), but the other tools run
+            # anyway: stopping here hid every real code issue behind one package finding - the
+            # uploader then fixes the package, re-uploads and only then learns about the rest.
+            # Nothing from the upload is executed by any tool, so continuing is safe.
             print()
             print(f"[unified-scan] MALWARE-GATE FEHLGESCHLAGEN: "
-                  f"{len(malware_critical)} bösartige(s) Paket(e) gefunden.")
-            print("[unified-scan] Security-Scan wird NICHT ausgeführt — "
-                  "erst Malware-Befunde klären.")
+                  f"{len(malware_critical)} bösartige(s) Paket(e) gefunden - "
+                  "die übrigen Prüfungen laufen trotzdem, das Ergebnis bleibt gesperrt.")
             for f in malware_critical:
                 print(f"  - {f.title}")
-            combined = {
-                "target": args.target,
-                "source_kind": source_kind,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "gate": "malware",
-                "gate_passed": False,
-                "tools": tool_meta,
-                "employee_findings": [f.to_dict() for f in malware_findings],
-            }
-            (out_dir / "combined_report.json").write_text(json.dumps(combined, indent=2))
-            (out_dir / "employee_findings.md").write_text(
-                render_employee_markdown(malware_findings, args.target, source_kind))
-            print(f"[unified-scan] Report in: {out_dir / 'employee_findings.md'}")
-            return 1
 
         all_findings: list[Finding] = list(malware_findings)
 
@@ -1858,7 +1848,7 @@ def main() -> int:
             "source_kind": source_kind,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "gate": "malware",
-            "gate_passed": True,
+            "gate_passed": gate_passed,
             "tools": tool_meta,
             "employee_findings": [f.to_dict() for f in all_findings],
             "internal_criticality": criticality,
