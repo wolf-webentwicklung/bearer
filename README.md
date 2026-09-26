@@ -1,3 +1,38 @@
+## 🔧 Dies ist ein erweiterter Fork von [Bearer/bearer](https://github.com/Bearer/bearer)
+
+Bearer allein deckt SAST + Privacy/Datenfluss ab (sein Kern, unverändert).
+Dieser Fork ergänzt das um ein vorgelagertes **Malware-Gate** und drei
+weitere Security-Scanner zu einer kombinierten Pipeline mit zwei
+Report-Ebenen — gebaut für schnell mit AI-Tools erstellte Anwendungen
+("vibe coded" Dashboards/Tools, z.B. mit ChatGPT/Claude gebaut), die teils
+live mit echten Daten laufen.
+
+**Neu in diesem Fork** (siehe [`contrib/unified-scan/`](contrib/unified-scan/)):
+
+| Tool | Neu hinzugefügt für | 
+|---|---|
+| **guarddog** | Malware-Gate — läuft ZUERST, prüft PyPI/npm-Dependencies auf bösartige Pakete. Fund → Pipeline stoppt, Security-Scan läuft gar nicht erst. |
+| **trufflehog** | Secrets im Code + komplette Git-History (auch gelöschte, aber noch in der History liegende Secrets) |
+| **trivy** | Dependency-CVEs (SCA) + Docker-Base-Image-CVEs |
+| **checkov** | IaC-Fehlkonfigurationen (Terraform/K8s/Docker/CloudFormation) |
+
+Ablauf: `guarddog` (Malware-Gate) → nur wenn sauber → `bearer` +
+`trufflehog` + `trivy` + `checkov` (Security-Scan).
+
+- Funktioniert mit lokalen Ordnern, egal ob mit oder ohne Git (z.B. ein
+  Skript, das direkt auf einem Server bearbeitet und nie in eine
+  Versionskontrolle eingecheckt wurde) und mit Git-URLs (GitHub, GitLab,
+  selbstgehostet, beliebiger Host).
+- Zwei Report-Ebenen: `employee_findings.md` (was muss gefixt werden) und
+  `internal_criticality.md` (interne Score/Ampel-Einschätzung für Go/No-Go).
+- Alle Tools laufen lokal, kein Cloud-Call für den eigenen Code (Details
+  und einzige Ausnahme siehe unten verlinkt).
+
+**→ Volle Dokumentation, Nutzung, Installation:
+[`contrib/unified-scan/README.md`](contrib/unified-scan/README.md)**
+
+---
+
 <div align="center">
   <a href="https://cycode.com/cygives/" alt="Bearer is part of Cygives, the community hub for free & open developer security tools."/>
     <picture>
@@ -27,35 +62,6 @@
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 </div>
-
-> ## 🔧 Dies ist ein erweiterter Fork von [Bearer/bearer](https://github.com/Bearer/bearer)
->
-> Zusätzlich zum originalen Bearer CLI (SAST + Privacy) bringt dieser Fork
-> unter [`contrib/unified-scan/`](contrib/unified-scan/) einen kombinierten
-> **Malware- + Security-Scan-Wrapper** für "vibe coded" Anwendungen
-> (z.B. mit ChatGPT/Claude gebaute Dashboards, die live mit echten Daten
-> laufen):
->
-> **Pipeline: erst Malware-Gate, dann Security-Scan**
-> ```
-> Stufe 0 (Malware-Gate)  → guarddog   — bösartige PyPI/npm-Pakete?
->                            (Fund → Stopp, Security-Scan läuft nicht)
-> Stufe 1 (Security-Scan) → bearer      — SAST + Privacy/Datenfluss
->                          → trufflehog — Secrets im Code + Git-History
->                          → trivy      — Dependency-CVEs + Docker-Base-Image-CVEs
->                          → checkov    — IaC-Fehlkonfigurationen
-> ```
->
-> - Funktioniert mit lokalen Ordnern (Git oder nicht — z.B. R/Shiny-Projekte
->   ohne Versionskontrolle) und mit Git-URLs (GitHub, GitLab, selbstgehostet,
->   beliebiger Host).
-> - Zwei Report-Ebenen: `employee_findings.md` (was muss gefixt werden) und
->   `internal_criticality.md` (interne Score/Ampel-Einschätzung für Go/No-Go).
-> - Alle Tools laufen lokal, kein Cloud-Call für den eigenen Code (Details
->   und einzige Ausnahme siehe unten verlinkt).
->
-> **→ Volle Dokumentation, Nutzung, Installation:
-> [`contrib/unified-scan/README.md`](contrib/unified-scan/README.md)**
 
 ## Language Support
 
