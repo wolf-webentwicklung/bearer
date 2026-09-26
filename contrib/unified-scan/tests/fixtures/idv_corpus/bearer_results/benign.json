@@ -274,5 +274,25 @@
    },
    "title": "Leakage of information in logger message"
   }
+ ],
+ "medium": [
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_report_stringbuilt.py",
+   "full_filename": "/src/sql_report_stringbuilt.py",
+   "id": "idv_python_sql_string_building",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 30,
+     "start": 12
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "SQL query built from strings"
+  }
  ]
 }

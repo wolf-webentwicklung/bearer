@@ -1,0 +1,60 @@
+{
+ "high": [
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "yaml_safe.py",
+   "full_filename": "/src/yaml_safe.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 20,
+     "start": 10
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Unsanitized dynamic input in file path"
+  }
+ ],
+ "low": [
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "node_exec_literal.js",
+   "full_filename": "/src/node_exec_literal.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 50,
+     "start": 34
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Leakage of information in logger message"
+  },
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "node_exec_literal.js",
+   "full_filename": "/src/node_exec_literal.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 22,
+     "start": 1
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "Leakage of information in logger message"
+  }
+ ]
+}

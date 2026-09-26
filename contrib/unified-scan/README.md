@@ -370,6 +370,55 @@ trivy-Funde (`trivy`, `trivy-image`) tragen zusätzlich `package`, `installed_ve
 `null` wenn es noch keinen Fix gibt). Damit kann ein Verbraucher die CVEs pro Paket bündeln
 und die nötige Update-Version anzeigen. Bei allen anderen Tools sind die Felder `null`.
 
+## Eigene Bearer-Regeln (`custom-rules/`)
+
+Für Muster, die die Standardregeln von Bearer nicht erkennen, liegen eigene Regeln im
+Bearer-Regelformat unter `custom-rules/`. Das Image kopiert sie nach `/opt/bearer-rules/idv/`,
+also in dasselbe Verzeichnis wie die Standardregeln. Das ist nötig, weil Bearer `imports`
+(geteilte Regeln wie `python_shared_lang_import1`) nur innerhalb eines Regelverzeichnisses
+auflöst; ein zweites `--external-rule-dir` sieht sie nicht.
+
+| Regel | Findet | Schweregrad / Kategorie |
+|---|---|---|
+| `idv_python_db_password_in_code` | Passwort im Connection-String oder als `password=` an `connect()`/`create_engine()` (pyodbc, psycopg2, SQLAlchemy-URL) | high / `secret` (nie begründbar) |
+| `idv_javascript_db_password_in_code` | Passwort in einem Connection-String | high / `secret` |
+| `idv_python_sql_string_building` | SQL an `execute()` per `+`, `%`, `.format()` oder f-String | medium (begründbar) |
+| `idv_python_yaml_unsafe_load` | `yaml.load` ohne `SafeLoader`, `yaml.unsafe_load`/`full_load` | high |
+| `idv_javascript_child_process_dynamic` | `exec`/`execSync` mit nicht festem Befehl | high |
+| `idv_javascript_eval_dynamic` | `eval`/`new Function` mit nicht festem Code | critical |
+
+Passwörter aus Umgebung oder Konfiguration schlagen nicht an: Bearer setzt für Werte, die
+es nicht auflösen kann, ein Platzhalterzeichen außerhalb von ASCII ein; die Regeln verlangen
+direkt nach `PWD=`/`password=` ein normales Passwortzeichen.
+
+Meldet eine Standardregel dieselbe Schwachstelle (gleiche CWE) in derselben Zeile, wird der
+Fund der eigenen Regel verworfen (`_drop_duplicate_custom_findings`), damit nichts doppelt
+erscheint.
+
+**C#:** Bearer kann kein C#. Für genau ein Muster, ein Klartext-Passwort in einem
+Connection-String-Literal (`"...;Password=geheim;..."`), gibt es einen kleinen eigenen Check in
+`unified_scan.py` (`scan_csharp_db_passwords`, Regel-ID `idv_csharp_db_password_in_code`,
+high / `secret`). Interpolierte Strings (`$"...Password={pw}"`) zählen nicht.
+
+Korpus mit gefährlichen und harmlosen Varianten: `tests/fixtures/idv_corpus/custom/`.
+
+## Score (`internal_criticality`)
+
+Jede Regelgruppe zählt **einmal** mit ihrem höchsten Schweregrad, egal an wie vielen Stellen
+sie vorkommt (Gruppe = Tool + Regel-ID, bei trivy Tool + Paket). Gewichte: critical 40,
+high 20, medium 8, low 2, info 0. low und info zusammen höchstens 5 Punkte, allein also nie
+über GRÜN hinaus. Funde in Testpfaden zählen nicht.
+
+| Verdict | Bedingung |
+|---|---|
+| RED | mindestens eine critical-Gruppe oder Score ≥ 80 |
+| GELB | mindestens eine high-Gruppe oder Score ≥ 40 |
+| GELB-GRÜN | Score ≥ 10 |
+| GRÜN | sonst |
+
+`by_severity` zählt Gruppen, `rule_groups` ist ihre Anzahl, `total_findings` zählt weiterhin
+die einzelnen Stellen.
+
 ## Test-Code-Filter
 
 Findings in echten Test-Pfaden (`test/`, `tests/`, `__tests__/`, `spec/`,
@@ -440,21 +489,6 @@ werden erkannt (Stage-Aliase wie `AS builder` fließen nicht als Image-Ref
 ein). Relevant weil viele AI-gebaute Dashboards mit veralteten Docker-
 Base-Images deployed werden (z.B. `python:3.9-slim`, `node:12-alpine`),
 die selbst Dutzende bekannte CVEs mitbringen, unabhängig vom eigenen Code.
-
-## Beispiel-Score-Logik
-
-```
-score = min(100, Σ severity_weight(finding))   # ohne Test-/Beispielcode
-  critical = 40, high = 20, medium = 8, low = 2
-
-RED    : mind. 1 critical, oder Score >= 80
-GELB   : mind. 1 high, oder Score >= 40
-GELB-GRÜN: Score >= 10
-GRÜN   : sonst
-```
-
-Score-Gewichtung ist bewusst simpel und in `compute_criticality()`
-zentral anpassbar (z.B. andere Gewichte pro Team-Risikoappetit).
 
 ## Malware-Gate im Detail
 

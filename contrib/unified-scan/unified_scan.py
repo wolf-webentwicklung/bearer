@@ -566,8 +566,62 @@ def parse_bearer_json(data: dict[str, Any],
                 description=_plain_summary(item.get("description") or ""),
                 raw=item,
             ))
+    findings = _drop_duplicate_custom_findings(findings)
     for f in findings:
+        if f.rule_id in CUSTOM_SECRET_RULES:
+            f.category = "secret"
+            f.excluded_from_score = _excluded_from_score(f.severity, f.category, f.file)
         apply_severity_policy(f, policy or [])
+    return findings
+
+
+# Own Bearer rules (custom-rules/, baked into the image next to bearer-rules) for patterns the
+# default rules miss. A password written into the code is a secret like any other.
+CUSTOM_RULE_PREFIX = "idv_"
+CUSTOM_SECRET_RULES = {"idv_python_db_password_in_code", "idv_javascript_db_password_in_code",
+                       "idv_csharp_db_password_in_code"}
+
+
+def _cwe_ids(f: Finding) -> set[str]:
+    return {str(c) for c in (f.raw.get("cwe_ids") or [])}
+
+
+def _drop_duplicate_custom_findings(findings: list[Finding]) -> list[Finding]:
+    """An own rule finding at a line where a default Bearer rule already reports the same
+    weakness (same CWE) adds nothing - keep the default one."""
+    default = {(f.file, f.line, c) for f in findings if not f.rule_id.startswith(CUSTOM_RULE_PREFIX)
+               for c in _cwe_ids(f)}
+    return [f for f in findings
+            if not f.rule_id.startswith(CUSTOM_RULE_PREFIX)
+            or not any((f.file, f.line, c) in default for c in _cwe_ids(f))]
+
+
+# Bearer has no C# support. Small, deliberately narrow own check for one pattern only: a
+# password written into a connection string literal ("...;Password=geheim;..."). An
+# interpolated value ($"...Password={pw}") or an empty one doesn't count.
+_CSHARP_DB_PASSWORD = re.compile(
+    r'"[^"\n]*\b(?:password|pwd)\s*=\s*[A-Za-z0-9!#%&()+,./:<>?@^_|~-][^"\n]*"', re.IGNORECASE)
+_CSHARP_MAX_BYTES = 2 * 1024 * 1024
+
+
+def scan_csharp_db_passwords(target: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    for path in sorted(target.rglob("*.cs")):
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > _CSHARP_MAX_BYTES:
+            continue
+        rel = str(path.relative_to(target))
+        text = path.read_text(errors="ignore")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for m in _CSHARP_DB_PASSWORD.finditer(line):
+                if line[:m.start()].rstrip().endswith("$"):
+                    continue  # interpolated string: the value comes from a variable
+                findings.append(Finding(
+                    tool="bearer", severity="high", rule_id="idv_csharp_db_password_in_code",
+                    title="Database password in the code", file=rel, line=lineno,
+                    category="secret",
+                    description="The connection string contains the password in plain text.",
+                    raw={"cwe_ids": ["798"]},
+                ))
     return findings
 
 
@@ -607,7 +661,7 @@ def scan_bearer(target: Path, tmp_json: Path,
         meta["error"] = f"could not parse bearer json: {e}"
         return findings, meta
 
-    findings = parse_bearer_json(data, policy)
+    findings = parse_bearer_json(data, policy) + scan_csharp_db_passwords(target)
     meta["severity_policy_applied"] = bool(policy)
     meta["severity_policy_changed"] = sum(1 for f in findings if f.original_severity)
     meta["finding_count"] = len(findings)
@@ -1326,17 +1380,35 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     return findings, meta
 
 
+LOW_SCORE_CAP = 5  # low/info together: never more than a hint, can't leave GRÜN on their own
+
+
+def _score_group(f: Finding) -> tuple[str, str]:
+    """One rule = one group, however many locations it has (trivy: one package = one group)."""
+    return (f.tool, f"pkg:{f.package}") if f.package else (f.tool, f.rule_id)
+
+
 def compute_criticality(findings: list[Finding]) -> dict[str, Any]:
     scored = [f for f in findings if not f.excluded_from_score]
     excluded_count = len(findings) - len(scored)
 
+    # Each rule group counts once with its highest severity - 20 locations of one low hint
+    # are still one low hint.
+    groups: dict[tuple[str, str], Finding] = {}
+    for f in scored:
+        key = _score_group(f)
+        if key not in groups or SEVERITY_ORDER.index(f.severity) < SEVERITY_ORDER.index(groups[key].severity):
+            groups[key] = f
+
     by_sev = {s: 0 for s in SEVERITY_ORDER}
     by_category: dict[str, int] = {}
-    for f in scored:
+    for f in groups.values():
         by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
         by_category[f.category] = by_category.get(f.category, 0) + 1
 
-    raw_score = sum(SEVERITY_WEIGHT[s] * n for s, n in by_sev.items())
+    blocking_score = sum(SEVERITY_WEIGHT[s] * by_sev[s] for s in ("critical", "high", "medium"))
+    low_score = min(LOW_SCORE_CAP, sum(SEVERITY_WEIGHT[s] * by_sev[s] for s in ("low", "info")))
+    raw_score = blocking_score + low_score
     score = min(100, raw_score)
 
     if by_sev["critical"] > 0 or score >= 80:
@@ -1352,7 +1424,8 @@ def compute_criticality(findings: list[Finding]) -> dict[str, Any]:
         "score_0_100": score,
         "raw_weighted_score": raw_score,
         "verdict": verdict,
-        "by_severity": by_sev,
+        "by_severity": by_sev,  # rule groups, not locations
+        "rule_groups": len(groups),
         "by_category": by_category,
         "total_findings": len(scored),
         "total_findings_including_excluded": len(findings),

@@ -121,15 +121,17 @@ def test_to_dict_carries_original_severity(policy):
 def test_corpus_benign_scripts_only_blocked_by_justifiable_findings(policy):
     before = parse_bearer_json(_bearer("benign"))
     after = parse_bearer_json(_bearer("benign"), policy)
-    assert sum(f.severity in BLOCKING for f in before) == 13
+    # 13 from Bearer's default rules + the string-built SQL report (own rule, medium)
+    assert sum(f.severity in BLOCKING for f in before) == 14
     blocking_after = [f for f in after if f.severity in BLOCKING]
-    # left: local pickle cache (2x) + subprocess with a fixed argument list - all high, so
-    # they block but can be justified; nothing critical any more
+    # left: local pickle cache (2x) + subprocess with a fixed argument list (high) and the
+    # string-built SQL report (own rule, medium) - all justifiable, nothing critical any more
     assert sorted(f.rule_id for f in blocking_after) == [
-        "python_lang_avoid_pickle", "python_lang_avoid_pickle", "python_lang_os_command_injection",
+        "idv_python_sql_string_building", "python_lang_avoid_pickle", "python_lang_avoid_pickle",
+        "python_lang_os_command_injection",
     ]
-    assert all(f.severity == "high" for f in blocking_after)
-    assert {f.file for f in blocking_after} == {"pickle_cache_local.py", "run_tool.py"}
+    assert all(f.severity in ("high", "medium") for f in blocking_after)
+    assert {f.file for f in blocking_after} == {"pickle_cache_local.py", "run_tool.py", "sql_report_stringbuilt.py"}
 
 
 def test_corpus_dangerous_code_still_blocks(policy):

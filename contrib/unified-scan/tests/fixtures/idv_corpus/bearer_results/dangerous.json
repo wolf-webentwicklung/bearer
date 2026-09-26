@@ -2,6 +2,24 @@
  "critical": [
   {
    "cwe_ids": [
+    "95"
+   ],
+   "filename": "exec_js.js",
+   "full_filename": "/src/exec_js.js",
+   "id": "idv_javascript_eval_dynamic",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 22,
+     "start": 1
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Code built from variables is executed"
+  },
+  {
+   "cwe_ids": [
     "502"
    ],
    "filename": "pickle_remote.py",
@@ -74,6 +92,60 @@
   }
  ],
  "high": [
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "exec_js.js",
+   "full_filename": "/src/exec_js.js",
+   "id": "idv_javascript_child_process_dynamic",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 58,
+     "start": 1
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Shell command built from variables"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "hardcoded_password.py",
+   "full_filename": "/src/hardcoded_password.py",
+   "id": "idv_python_db_password_in_code",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 88,
+     "start": 12
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "idv_python_yaml_unsafe_load",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 49,
+     "start": 16
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "Unsafe YAML loading"
+  },
   {
    "cwe_ids": [
     "22"

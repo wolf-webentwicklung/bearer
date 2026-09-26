@@ -1,0 +1,39 @@
+# child_process.exec/execSync with a command that isn't a fixed string. Bearer's own
+# javascript_lang_dynamic_os_command only fires when it can trace the value to user input;
+# duplicates at the same line are dropped by unified_scan.py.
+patterns:
+  - pattern: exec($<CMD>$<...>)
+    filters:
+      - not:
+          variable: CMD
+          regex: '\A("[^"]*"|''[^'']*''|`[^`$]*`)\z'
+  - pattern: execSync($<CMD>$<...>)
+    filters:
+      - not:
+          variable: CMD
+          regex: '\A("[^"]*"|''[^'']*''|`[^`$]*`)\z'
+  - pattern: $<CP>.$<METHOD>($<CMD>$<...>)
+    filters:
+      - variable: CP
+        regex: '\A(child_process|childProcess|cp|require\(\s*["'']child_process["'']\s*\))\z'
+      - variable: METHOD
+        values: [exec, execSync]
+      - not:
+          variable: CMD
+          regex: '\A("[^"]*"|''[^'']*''|`[^`$]*`)\z'
+languages:
+  - javascript
+severity: high
+metadata:
+  description: Shell command built from variables
+  remediation_message: |-
+    ## Description
+
+    child_process.exec/execSync runs the string in a shell. If a part of it comes from outside, other commands can be injected.
+
+    ## Remediations
+
+    - **Do** use execFile/spawn with a fixed program and an argument array.
+  cwe_id:
+    - 78
+  id: idv_javascript_child_process_dynamic

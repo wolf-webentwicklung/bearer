@@ -1,0 +1,46 @@
+patterns:
+  - pattern: $<CURSOR>.$<METHOD>($<QUERY>$<...>)
+    filters:
+      - variable: METHOD
+        values: [execute, executemany, executescript]
+      - variable: QUERY
+        detection: idv_python_sql_string_building_dynamic
+        scope: result
+auxiliary:
+  - id: idv_python_sql_string_building_dynamic
+    patterns:
+      - pattern: $<LEFT> + $<RIGHT>
+        filters:
+          - either:
+              - variable: LEFT
+                regex: (?i)\A[rbu]*["'].*\b(select|insert|update|delete|where|from|values|set)\b
+              - variable: RIGHT
+                regex: (?i)\A[rbu]*["'].*\b(select|insert|update|delete|where|from|values|set)\b
+      - pattern: $<LEFT> % $<RIGHT>
+        filters:
+          - variable: LEFT
+            regex: (?i)\A[rbu]*["'].*\b(select|insert|update|delete|where|from|values|set)\b
+      - pattern: $<FSTRING>
+        filters:
+          - variable: FSTRING
+            regex: (?is)\A[rb]*f["'].*\b(select|insert|update|delete|where|from|values|set)\b.*\{
+      - pattern: $<STRING>.format($<...>)
+        filters:
+          - variable: STRING
+            regex: (?i)\A[rbu]*["'].*\b(select|insert|update|delete|where|from|values|set)\b
+languages:
+  - python
+severity: medium
+metadata:
+  description: SQL query built from strings
+  remediation_message: |-
+    ## Description
+
+    The SQL query passed to execute() is built with +, %, .format() or an f-string. If any part comes from outside, it can change the query (SQL injection).
+
+    ## Remediations
+
+    - **Do** use placeholders and pass the values separately: cur.execute("... WHERE id = ?", (value,)).
+  cwe_id:
+    - 89
+  id: idv_python_sql_string_building
