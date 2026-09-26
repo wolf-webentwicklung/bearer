@@ -28,6 +28,35 @@
 
 </div>
 
+> ## 🔧 Dies ist ein erweiterter Fork von [Bearer/bearer](https://github.com/Bearer/bearer)
+>
+> Zusätzlich zum originalen Bearer CLI (SAST + Privacy) bringt dieser Fork
+> unter [`contrib/unified-scan/`](contrib/unified-scan/) einen kombinierten
+> **Malware- + Security-Scan-Wrapper** für "vibe coded" Anwendungen
+> (z.B. mit ChatGPT/Claude gebaute Dashboards, die live mit echten Daten
+> laufen):
+>
+> **Pipeline: erst Malware-Gate, dann Security-Scan**
+> ```
+> Stufe 0 (Malware-Gate)  → guarddog   — bösartige PyPI/npm-Pakete?
+>                            (Fund → Stopp, Security-Scan läuft nicht)
+> Stufe 1 (Security-Scan) → bearer      — SAST + Privacy/Datenfluss
+>                          → trufflehog — Secrets im Code + Git-History
+>                          → trivy      — Dependency-CVEs + Docker-Base-Image-CVEs
+>                          → checkov    — IaC-Fehlkonfigurationen
+> ```
+>
+> - Funktioniert mit lokalen Ordnern (Git oder nicht — z.B. R/Shiny-Projekte
+>   ohne Versionskontrolle) und mit Git-URLs (GitHub, GitLab, selbstgehostet,
+>   beliebiger Host).
+> - Zwei Report-Ebenen: `employee_findings.md` (was muss gefixt werden) und
+>   `internal_criticality.md` (interne Score/Ampel-Einschätzung für Go/No-Go).
+> - Alle Tools laufen lokal, kein Cloud-Call für den eigenen Code (Details
+>   und einzige Ausnahme siehe unten verlinkt).
+>
+> **→ Volle Dokumentation, Nutzung, Installation:
+> [`contrib/unified-scan/README.md`](contrib/unified-scan/README.md)**
+
 ## Language Support
 
 **Bearer CLI (Open Source)**: Go • Java • JavaScript • TypeScript • PHP • Python • Ruby
