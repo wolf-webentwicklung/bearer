@@ -356,6 +356,10 @@ path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz
   `top_<ökosystem>_packages.json` – wird zum Hinweis. Typosquats dieser Pakete stehen per
   Definition nicht auf der Liste und blockieren weiter, ebenso jedes andere Paket. Fehlt die
   Liste, wird nichts herabgestuft
+  **Restrisiko:** Eine kompromittierte Version eines beliebten Pakets (Supply-Chain-Angriff auf
+  den Maintainer) erscheint dadurch nur als Hinweis. Bekannte bösartige Versionen meldet trivy
+  über seine Advisory-Datenbank weiterhin; `trusted_top_n` lässt sich verkleinern oder auf 0
+  setzen (dann wird nichts herabgestuft)
 - **Exceptions mit Daten (`*_exception`) nur Hinweis:** betrifft Fehlermeldungen in Web-Antworten;
   schlug in mehreren Projekten auf harmlosen Zeilen an (z.B. `super().__init__`)
 - **olevba:** Button-Handler (`*_Click`, `*_DblClick`) sind nur ein Hinweis – sie laufen erst beim
