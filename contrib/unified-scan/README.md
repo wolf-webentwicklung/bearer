@@ -61,7 +61,7 @@ Malware-Gate leer durch), Fehler landen im Report unter
 `tools.<name>.error`.
 
 
-## Ziel: lokaler Ordner, Git oder nicht, oder eine Git-URL
+## Ziel: lokaler Ordner, Git oder nicht, eine Git-URL oder ein Archiv
 
 Das Script ist nicht auf GitHub oder auf Git überhaupt festgelegt:
 
@@ -83,7 +83,128 @@ python3 contrib/unified-scan/unified_scan.py /pfad/zum/projekt --out ./report
 python3 contrib/unified-scan/unified_scan.py https://github.com/org/repo.git --out ./report
 python3 contrib/unified-scan/unified_scan.py https://gitlab.com/org/repo.git --out ./report
 python3 contrib/unified-scan/unified_scan.py git@gitlab.company.com:team/repo.git --out ./report
+
+# .zip-/.7z-Archiv (z.B. ein hochgeladenes Skript)
+python3 contrib/unified-scan/unified_scan.py tool.zip --out ./report
 ```
+
+## Archiv als Ziel (.zip/.7z)
+
+Ein Archiv wird mit `safe_extract.py` in ein Temp-Verzeichnis entpackt,
+gescannt und danach wieder gelöscht, auch bei Fehlern. Beim Entpacken wird
+abgelehnt, was unsicher oder kaputt ist:
+
+- Pfade mit `..`, absolute Pfade (`/etc/...`, `C:/...`), Symlinks
+- passwortgeschützte Archive
+- ZIP-Bomben: max. 5000 Einträge, 50 MB pro Datei, 200 MB insgesamt.
+  Bei ZIP wird beim Schreiben gezählt, den Größen im Header wird nicht
+  vertraut. Bei 7z begrenzen die geprüften Header-Größen die
+  Dekompression, dazu `max_extract_size` von py7zr.
+- beschädigte Archive (CRC, kaputter Deflate-Stream) und nicht
+  unterstützte Verfahren (Deflate64, BCJ2, ...)
+
+Entpackte Dateien bekommen immer die Rechte `0644`/`0755`. Aus dem Archiv
+bleibt also kein Ausführ- oder Setuid-Bit übrig.
+
+Ein Archiv kann ein manipuliertes `.git` enthalten, das `git`/`trufflehog`
+dazu bringt, Dateien außerhalb des Archivs zu lesen oder Befehle
+auszuführen. Deshalb gilt im Archiv-Modus:
+
+- `.git` als Datei (`gitdir: /anderswo`) wird gelöscht.
+- `hooks/`, `objects/info/alternates`, `commondir` und `config.worktree`
+  werden gelöscht.
+- `.git/config` wird auf harmlose `[core]`/`[extensions]`-Werte reduziert,
+  also ohne `include`, `fsmonitor`, Filter oder Diff-Treiber.
+- Zusätzlich setzt das Script per Umgebung `core.fsmonitor=false` und
+  `core.hooksPath=/dev/null`.
+
+Alle `file`-Angaben im Report sind relativ zum Archiv-Wurzelverzeichnis,
+also z.B. `src/main.py` statt `/tmp/unified-scan-archive-x/src/main.py`.
+Das gilt für alle Tools und auch für lokale Ordner. GuardDog-Funde haben
+`pypi:<paket>` bzw. `npm:<paket>` als Ort.
+
+Exit-Codes: `0` ok, `1` mind. ein critical-Finding, `2` Ziel nicht
+auflösbar, `3` Archiv abgelehnt (Grund auf stderr, Zeile
+`Archiv abgelehnt: ...`).
+
+## HTTP-Wrapper (interner Scanner-Dienst)
+
+`http_wrapper.py` (nur Standardbibliothek) macht aus dem Script einen
+kleinen internen Dienst, z.B. für ein Webformular, das Skripte als ZIP
+annimmt:
+
+| Anfrage | Antwort |
+|---|---|
+| `POST /scan`, Body = rohes Archiv, Header `X-Filename: tool.zip` | `200` mit dem Inhalt von `combined_report.json` |
+| | `422 {"error": "..."}`: Archiv abgelehnt (unsicher, kaputt, zu groß, falscher Typ). Der Text ist für Endnutzer gedacht. |
+| | `5xx {"error": "..."}`: Scan fehlgeschlagen, `504` bei Zeitüberschreitung. Der Aufrufer darf es erneut versuchen. |
+| `GET /health` | `200 {"ok": true, "tools": {...}}`, antwortet auch während eines Scans |
+
+Zusätzlich zum normalen Report liefert der Wrapper:
+
+- `target`: der Dateiname aus `X-Filename`, ohne Pfad.
+- `incomplete` / `failed_tools`: `true` bzw. die Liste der Tools, die für
+  dieses Archiv nicht oder nur teilweise gelaufen sind. Das sind `error`,
+  `image_errors` oder `ecosystem_errors` unter `tools.<name>`.
+- NUL-Zeichen werden aus allen Texten entfernt. `line` ist entweder ein
+  int zwischen 1 und 10.000.000 oder `null`.
+- GuardDog-Funde: `tool: "guarddog"`, `category: "malware"`. Schlägt das
+  Malware-Gate an (`gate_passed: false`), fehlt `internal_criticality`,
+  weil der Security-Scan dann gar nicht läuft.
+
+Jeder Job läuft in einem eigenen Ordner unter `UNIFIED_SCAN_WORKDIR`, der
+auch als `TMPDIR` für alle Tools dient. Er wird vor der Antwort gelöscht.
+Bei einer Zeitüberschreitung wird die ganze Prozessgruppe beendet, also
+auch die Scanner selbst. Reste eines Absturzes werden beim Start entfernt.
+
+| Umgebungsvariable | Standard | Bedeutung |
+|---|---|---|
+| `UNIFIED_SCAN_PORT` | `8080` | Port |
+| `UNIFIED_SCAN_TIMEOUT_SECONDS` | `600` | harte Gesamtzeit pro Job |
+| `UNIFIED_SCAN_MAX_UPLOAD_BYTES` | `52428800` (50 MB) | max. Archivgröße |
+| `UNIFIED_SCAN_MAX_PARALLEL` | `1` | gleichzeitige Scans, weitere warten |
+| `UNIFIED_SCAN_WORKDIR` | Temp-Verzeichnis | Ort der Job-Ordner |
+
+### Docker
+
+```bash
+docker build -t unified-scan contrib/unified-scan
+
+docker network create --internal scan   # kein Internet, siehe unten
+docker run -d --name unified-scan --network scan \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory 3g --cpus 2 --pids-limit 256 \
+  -e UNIFIED_SCAN_TIMEOUT_SECONDS=600 \
+  unified-scan
+```
+
+Das Image enthält bearer, trufflehog, trivy, checkov und guarddog in
+festen Versionen (Build-Args im `Dockerfile`), läuft als Nutzer ohne
+Root-Rechte und schreibt nur nach `/tmp`.
+
+Größen: checkov und guarddog (semgrep) brauchen jeweils mehrere hundert MB
+RAM. Ein tmpfs zählt zum Speicherlimit des Containers. Deshalb eher 3 GB
+RAM und 1 GB tmpfs, nicht weniger.
+
+**Netzwerk:** Zwei Schritte brauchen zur Laufzeit Internet:
+1. `guarddog` lädt die zu prüfenden Pakete von PyPI/npm.
+2. `trivy image` holt die Base-Images aus Dockerfiles.
+
+In einem `--internal`-Netz scheitern beide. Sie stehen dann in
+`failed_tools`, und der Report hat `incomplete: true`. Die
+trivy-Schwachstellen-Datenbank wird standardmäßig beim Build ins Image
+gelegt (`TRIVY_BAKE_DB=1`), das Image muss also regelmäßig neu gebaut
+werden, damit sie aktuell bleibt. Mit `--build-arg TRIVY_BAKE_DB=0` lädt
+trivy sie stattdessen zur Laufzeit, das braucht ebenfalls Internet.
+
+Möglichkeiten:
+- **Kein Internet:** maximale Abschottung, dafür ohne GuardDog und
+  Base-Image-Scan.
+- **Ausgang nur über einen Proxy mit Allowlist:** `pypi.org`,
+  `files.pythonhosted.org`, `registry.npmjs.org` und die nötigen
+  Registries, gesetzt über `HTTPS_PROXY`. Der Container darf interne
+  Dienste (DB, App) trotzdem nicht erreichen.
 
 ## Sprachgrenze von Bearer
 
