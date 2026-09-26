@@ -26,10 +26,12 @@ Stufe 0: Malware-Gate
                    (Typosquatting, verdächtige Install-Scripts,
                     Obfuskierung, Daten-Exfiltration-Muster)
 
-  Findet sich hier ein "high_risk"-Paket: STOPP. Security-Scan (Stufe 1)
-  läuft NICHT. Report enthält nur den Malware-Fund, Exit-Code 1.
+  Findet sich hier ein "high_risk"-Paket: Gate fehlgeschlagen
+  (gate_passed: false, Exit-Code 1, Ergebnis gesperrt). Stufe 1 läuft
+  trotzdem, damit alle Probleme auf einmal sichtbar sind – kein Tool
+  führt Code aus dem Upload aus.
 
-Stufe 1: Security-Scan (nur wenn Stufe 0 sauber durchläuft)
+Stufe 1: Security-Scan (läuft immer)
   ├─ bearer      -> SAST + Privacy/Datenfluss
   ├─ trufflehog  -> Secrets im Code + Git-History
   ├─ trivy       -> Dependency-CVEs (SCA) + Docker-Base-Image-CVEs
@@ -156,8 +158,8 @@ Zusätzlich zum normalen Report liefert der Wrapper:
 - NUL-Zeichen werden aus allen Texten entfernt. `line` ist entweder ein
   int zwischen 1 und 10.000.000 oder `null`.
 - GuardDog-Funde: `tool: "guarddog"`, `category: "malware"`. Schlägt das
-  Malware-Gate an (`gate_passed: false`), fehlt `internal_criticality`,
-  weil der Security-Scan dann gar nicht läuft.
+  Malware-Gate an (`gate_passed: false`), läuft der Security-Scan trotzdem;
+  `internal_criticality` ist vorhanden, das Ergebnis bleibt gesperrt.
 
 Jeder Job läuft in einem eigenen Ordner unter `UNIFIED_SCAN_WORKDIR`, der
 auch als `TMPDIR` für alle Tools dient. Er wird vor der Antwort gelöscht.
@@ -496,8 +498,8 @@ Scheitert auch der Kontrolllauf, liegt es an Netzwerk/Proxy/Registry, also
 an der Infrastruktur: das landet nur unter `tools.guarddog.ecosystem_errors`
 (Hinweis "teilweise nicht geprüft", blockiert nicht). Entschieden wird über
 das Verhalten, nicht über den Fehlertext — der kann Inhalt der hochgeladenen
-Liste enthalten und wäre damit vom Uploader steuerbar. Das Malware-Gate stoppt die Pipeline nur bei echten
-Malware-Funden (Kategorie `malware`), nicht bei `unscannable`.
+Liste enthalten und wäre damit vom Uploader steuerbar. Das Malware-Gate schlägt nur bei echten
+Malware-Funden (Kategorie `malware`) fehl, nicht bei `unscannable`.
 
 olevba wählt Dateien nicht nur nach Endung aus, sondern auch nach Inhalt:
 OLE-Container (`D0 CF 11 E0`) und OOXML-ZIPs mit `vbaProject.bin` werden
@@ -626,9 +628,9 @@ Angriffsklasse, unabhängig von der Shell.
   0 Findings, komplette Security-Pipeline läuft danach normal durch.
   Simulierter `high_risk`-Fund (guarddog gemockt, da reale bekannte
   Malware-Pakete längst von PyPI/npm entfernt und nicht mehr für Tests
-  installierbar sind) stoppt die Pipeline korrekt vor Stufe 1 — kein
-  Security-Scan läuft, Exit-Code 1, Report enthält nur den Malware-Fund
-  mit `gate_passed: false`.
+  installierbar sind) lässt das Gate fehlschlagen (`gate_passed: false`,
+  Exit-Code 1); die übrigen Tools laufen trotzdem, damit alle Funde auf
+  einmal sichtbar sind.
 - Office-Makro-Scan: echte `.docm`-Testdatei mit 2 AutoExec-Makros
   (ActiveX-Events) + Hex-String-Obfuskierung (aus dem offiziellen
   oletools-Test-Corpus) korrekt als 2× `high` + 1× `medium` + 1× `low`

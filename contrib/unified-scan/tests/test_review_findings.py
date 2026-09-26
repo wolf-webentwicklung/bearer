@@ -292,6 +292,25 @@ def test_unscannable_manifest_does_not_skip_security_scan(tmp_path, monkeypatch)
     assert report['gate_passed'] is True and len(ran) == 6
 
 
+def test_failed_malware_gate_still_runs_all_tools(tmp_path, monkeypatch):
+    """A critical malware finding fails the gate, but every other tool still runs so the
+    uploader sees all problems at once."""
+    evil = unified_scan.Finding(tool='guarddog', severity='critical', rule_id='threat-x',
+                                title='bad', file='pypi:evilpkg', category='malware')
+    monkeypatch.setattr(unified_scan, 'scan_guarddog', lambda t: ([evil], {}))
+    monkeypatch.setattr(unified_scan, 'load_guarddog_policy', lambda: {})
+    ran = []
+    for name in ('scan_bearer', 'scan_trufflehog', 'scan_trivy', 'scan_trivy_docker_images',
+                 'scan_checkov', 'scan_olevba'):
+        monkeypatch.setattr(unified_scan, name, lambda *a, n=name: (ran.append(n), ([], {}))[1])
+    monkeypatch.setattr(sys, 'argv', ['unified_scan.py', str(tmp_path), '--out', str(tmp_path / 'r')])
+    assert unified_scan.main() == 1
+    report = json.loads((tmp_path / 'r/combined_report.json').read_text())
+    assert report['gate_passed'] is False and len(ran) == 6
+    assert report['internal_criticality']['by_severity']['critical'] == 1
+    assert [f['rule_id'] for f in report['employee_findings']] == ['threat-x']
+
+
 # --- wrapper priority (M2) ------------------------------------------------------------------
 
 def test_wrapper_runs_scan_with_low_priority(tmp_path, monkeypatch):
