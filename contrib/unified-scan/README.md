@@ -402,6 +402,11 @@ high / `secret`). Interpolierte Strings (`$"...Password={pw}"`) zählen nicht.
 
 Korpus mit gefährlichen und harmlosen Varianten: `tests/fixtures/idv_corpus/custom/`.
 
+**trufflehog-Platzhalter:** Die Connection-String-Detektoren von trufflehog halten Platzhalter
+wie `Password={pw}` oder `${DB_PASSWORD}` für ein Passwort. Solche Funde (Wert `{…}`, `${…}`,
+`%s`, `%(x)s`, `$VAR`, `<…>`, `***`) werden verworfen. Meldet trufflehog in derselben Zeile ein
+Secret wie eine eigene Passwort-Regel, bleibt nur der trufflehog-Fund (`drop_secret_duplicates`).
+
 ## Score (`internal_criticality`)
 
 Jede Regelgruppe zählt **einmal** mit ihrem höchsten Schweregrad, egal an wie vielen Stellen
