@@ -1,6 +1,6 @@
 # unified-scan
 
-Erweiterung dieses Bearer-Forks: kombiniert Bearer mit vier weiteren
+Erweiterung dieses Bearer-Forks: kombiniert Bearer mit fünf weiteren
 Open-Source-Scannern zu einem einzigen Kommando mit zwei Report-Ebenen,
 vorgelagert durch ein Malware-Gate.
 
@@ -12,6 +12,7 @@ nicht:
 - Secrets in Code/Git-History
 - bekannte CVEs in Dependencies (SCA) + Docker-Base-Images
 - IaC-Fehlkonfigurationen (Terraform/K8s/Docker/CloudFormation)
+- bösartige VBA-Makros in Office-Dateien (.doc*/.xls*/.ppt*)
 
 Genau das sind die häufigsten Lecks bei schnell mit AI-Tools gebauten Apps
 (ChatGPT/Claude-Dashboards, R/Shiny-Dashboards etc.), die live mit echten
@@ -32,7 +33,9 @@ Stufe 1: Security-Scan (nur wenn Stufe 0 sauber durchläuft)
   ├─ bearer      -> SAST + Privacy/Datenfluss
   ├─ trufflehog  -> Secrets im Code + Git-History
   ├─ trivy       -> Dependency-CVEs (SCA) + Docker-Base-Image-CVEs
-  └─ checkov     -> IaC-Fehlkonfigurationen
+  ├─ checkov     -> IaC-Fehlkonfigurationen
+  └─ olevba      -> Office-VBA-Makros (.doc*/.xls*/.ppt*): AutoExec,
+                     Shell/PowerShell-Aufrufe, Obfuskierung
 ```
 
 Begründung für die Reihenfolge: Wenn eine Dependency selbst bösartig ist,
@@ -49,6 +52,7 @@ Sicherheitslücken im eigenen Code prüfen.
 | [trufflehog](https://github.com/trufflesecurity/trufflehog) | Secrets im Code + Git-History | ja |
 | [trivy](https://github.com/aquasecurity/trivy) | Dependency-CVEs (SCA) + Docker-Base-Image-CVEs | ja (CVE-DB-Sync via Netz) |
 | [checkov](https://github.com/bridgecrewio/checkov) | IaC-Fehlkonfigurationen | ja |
+| [oletools/olevba](https://github.com/decalage2/oletools) | Office-VBA-Makros: AutoExec, Shell/PowerShell, Obfuskierung | ja |
 
 Kein Tool hier braucht eine Cloud-API oder ein LLM. Der gescannte
 **Zielcode selbst geht bei keinem Tool nach außen.** Einzige Ausnahme:
@@ -215,6 +219,13 @@ unter `tools.bearer.note`). Secrets (trufflehog), Dependency-CVEs (trivy,
 sofern `renv.lock` o.ä. erkannt wird) und IaC (checkov) laufen unabhängig
 davon normal weiter, da die nicht auf Sprach-Parsing angewiesen sind.
 
+R hat aktuell keinen dedizierten SAST-Scanner in dieser Pipeline — geprüft
+wurde Semgrep (R ist dort experimentell gelistet), aber `metavariable-regex`
+funktioniert für die R-Sprachintegration nicht zuverlässig (feuert auch bei
+einer nie-treffenden Regex), sodass ein robustes eigenes R-Regelset aktuell
+nicht sinnvoll wartbar wäre. Wird nicht ergänzt, bis es eine belastbarere
+Grundlage gibt.
+
 ## Installation der Abhängigkeiten
 
 ```bash
@@ -239,6 +250,11 @@ sudo ln -sf ~/.venvs/checkov/bin/checkov /usr/local/bin/checkov
 python3 -m venv ~/.venvs/guarddog
 ~/.venvs/guarddog/bin/pip install guarddog
 sudo ln -sf ~/.venvs/guarddog/bin/guarddog /usr/local/bin/guarddog
+
+# oletools/olevba (venv empfohlen, gleiches Muster wie guarddog/checkov)
+python3 -m venv ~/.venvs/oletools
+~/.venvs/oletools/bin/pip install oletools
+sudo ln -sf ~/.venvs/oletools/bin/olevba /usr/local/bin/olevba
 
 # git (für Git-URL-Ziele und History-Scan)
 ```
@@ -331,6 +347,40 @@ R/Shiny-Projekt ohne Python/JS-Dependencies), findet guarddog naturgemäß
 nichts — das Gate meldet 0 Findings und die Pipeline läuft normal weiter,
 das ist kein Fehler.
 
+## Office-Makro-Scan im Detail
+
+`olevba` scannt gezielt Dateien mit Office-Makro-fähiger Endung
+(`.doc`/`.dot`/`.docm`/`.dotm`, `.xls`/`.xlt`/`.xlsm`/`.xltm`/`.xlsb`/`.xlam`,
+`.ppt`/`.pot`/`.pps`/`.pptm`/`.potm`/`.ppsm`/`.ppam`) im Zielverzeichnis,
+jede Datei einzeln. **Bewusst kein rekursiver `olevba -r` über den ganzen
+Ordner** — verifiziert, dass das JEDE Textdatei (auch `.py`, `.txt`) als
+Pseudo-Makro einliest und massives Rauschen erzeugt; die gezielte
+Dateisuche vermeidet das.
+
+Meldungen werden nach Schweregrad gruppiert:
+- **AutoExec** (`high`) — Makro läuft automatisch beim Öffnen der Datei.
+  In einem Dashboard/Report, der i.d.R. gar keine Makros braucht, schon
+  für sich ein Warnsignal.
+- **Suspicious**, gestaffelt nach Keyword:
+  - `critical` — Shell-Ausführung (`Shell`, `WScript.Shell`,
+    `ShellExecute`), PowerShell-Aufrufe, Remote-Download
+    (`URLDownloadToFileA`, `Net.WebClient`), Prozess-Injection
+    (`CreateThread`, `VirtualAlloc`, `WriteProcessMemory`).
+  - `high` — `CreateObject`/`GetObject` (OLE-Objekt-Erzeugung),
+    Obfuskierungs-Funktionen (`Chr`, `StrReverse`, `Xor`, `CallByName`).
+  - `medium` — alles andere (z.B. reiner Datei-Zugriff `Open`/`Write`,
+    Umgebungsvariablen-Zugriff) — für sich harmlos, aber meldenswert.
+- **Hex/Base64-String-Erkennung** (`low`) — reiner Hinweis auf
+  Obfuskierung, kein direkter Beweis für Bösartigkeit.
+- **IOC** (URLs/IPs/Pfade im dekompilierten Code) wird bewusst **nicht**
+  als Einzelfinding gemeldet — verifiziert an einem realen Testfall mit
+  267 IOC-Treffern in einer einzigen Datei, das wäre nur Rauschen. Die
+  Anzahl landet als Zähler in `tools.olevba.ioc_count_not_reported_as_findings`,
+  für den Fall dass jemand tiefer graben will.
+
+Keine Office-Dateien im Projekt gefunden: `olevba` meldet das im Report
+(`tools.olevba.note`), kein Fehler, keine Blockade.
+
 ## Sicherheit des Scan-Ziels selbst
 
 Der `target`-Parameter (Git-URL oder lokaler Pfad) kommt von außen und wird
@@ -369,3 +419,12 @@ Angriffsklasse, unabhängig von der Shell.
   installierbar sind) stoppt die Pipeline korrekt vor Stufe 1 — kein
   Security-Scan läuft, Exit-Code 1, Report enthält nur den Malware-Fund
   mit `gate_passed: false`.
+- Office-Makro-Scan: echte `.docm`-Testdatei mit 2 AutoExec-Makros
+  (ActiveX-Events) + Hex-String-Obfuskierung (aus dem offiziellen
+  oletools-Test-Corpus) korrekt als 2× `high` + 1× `medium` + 1× `low`
+  gemeldet; identische, makrofreie `.docm`-Datei im selben Lauf korrekt
+  mit 0 Findings; Datei mit Office-Endung aber ohne olevba im PATH löst
+  sauberen `error`-Eintrag statt Absturz aus; volle Pipeline (`[0/7]`
+  bis `[6/7]`) end-to-end gegen ein gemischtes Git-Repo (Python-Datei +
+  2 Office-Dateien) durchlaufen, Score/Verdict korrekt aus den
+  olevba-Findings berechnet.

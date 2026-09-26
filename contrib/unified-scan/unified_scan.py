@@ -16,6 +16,9 @@ Zwei-Stufen-Pipeline:
     - trufflehog  (Secrets in Code + Git-History, falls Git-Repo vorhanden)
     - trivy       (Dependency-CVEs / SCA, braucht Lockfile; zusätzlich Docker-Base-Image-CVEs)
     - checkov     (IaC-Fehlkonfigurationen: Terraform/K8s/Docker/CloudFormation)
+    - olevba      (Office-VBA-Makros: .doc*/.xls*/.ppt* — AutoExec, Shell/
+                   PowerShell-Aufrufe, Obfuskierung; deckt eine Lücke ab, die
+                   keines der anderen Tools abdeckt)
 
 Alle Tools laufen lokal, kein Cloud-Call für den gescannten Code selbst. Einzige
 Ausnahme: guarddog lädt zur Analyse die Paket-INHALTE (nicht euren Code) von
@@ -58,7 +61,7 @@ Nutzung:
 Exit-Codes: 0 = ok, 1 = mind. ein critical-Finding, 2 = Ziel nicht auflösbar,
 3 = Archiv abgelehnt (unsicher/ungültig, Grund auf stderr).
 
-Erfordert im PATH: bearer, trufflehog, trivy, checkov, guarddog, git
+Erfordert im PATH: bearer, trufflehog, trivy, checkov, guarddog, olevba, git
 (fehlende Tools werden übersprungen, nicht fatal - Report vermerkt das,
 außer guarddog fehlt komplett — dann läuft das Malware-Gate leer durch
 und wird im Report als nicht ausgeführt markiert, blockiert aber nicht).
@@ -751,6 +754,180 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 
 
 
+# ---------------------------------------------------------------------------
+# olevba (Office-VBA-Makro-Scan: .doc/.xls/.ppt-Familie mit Makros)
+# ---------------------------------------------------------------------------
+# Bearer/trufflehog/trivy/checkov/guarddog decken alle KEINE Office-Makros ab
+# (Bearer parst kein VBA-AST, trufflehog würde nur Klartext-Secrets im Byte-
+# Stream finden, nicht Makro-LOGIK). oletools/olevba ist ein dediziertes,
+# offline laufendes Tool dafür (keine Cloud-Abfrage, reine lokale Analyse der
+# OLE/OOXML-Struktur + VBA-P-Code-Dekompilierung).
+
+_OFFICE_MACRO_EXTENSIONS = {
+    ".doc", ".dot", ".docm", ".dotm",
+    ".xls", ".xlt", ".xlsm", ".xltm", ".xlsb", ".xlam",
+    ".ppt", ".pot", ".pps", ".pptm", ".potm", ".ppsm", ".ppam",
+}
+
+# Suspicious-Keywords, die olevba meldet, aber die für sich genommen sehr
+# häufig FALSE POSITIVES in legitimen Business-Makros sind (Dateizugriff,
+# Registry-Lesen etc.) vs. Keywords die praktisch nur in bösartigen Makros
+# vorkommen (Shell-Ausführung, Remote-Download, Prozess-Injection,
+# PowerShell-Aufruf). Grobes, aber begründetes Mapping statt "alles gleich
+# hoch" (das würde den Report für jedes Makro mit z.B. nur Open/Write auf
+# 'kritisch' hochziehen und den Report für Nutzer wertlos machen).
+_OLEVBA_CRITICAL_KEYWORDS = {
+    "shell", "wscript.shell", "shellexecute", "shellexecutea", "shell.application",
+    "powershell", "start-process", "invoke-expression",
+    "urldownloadtofilea", "net.webclient", "downloadfile", "downloadstring",
+    "msxml2.xmlhttp", "microsoft.xmlhttp", "msxml2.serverxmlhttp",
+    "createthread", "createuserthread", "virtualalloc", "virtualallocex",
+    "writeprocessmemory", "rtlmovememory", "setcontextthread", "queueapcthread",
+}
+_OLEVBA_HIGH_KEYWORDS = {
+    "createobject", "getobject", "new-object",
+    "chr", "chrb", "chrw", "strreverse", "xor", "callbyname",
+}
+
+
+def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
+    """None bedeutet: kein eigenes Finding (z.B. IOC — zu rauschanfällig,
+    siehe unten)."""
+    if keyword_type == "AutoExec":
+        return "high"  # Makro läuft automatisch beim Öffnen — an sich schon
+        # ein Warnsignal in einem "Dashboard mit echten Daten", das i.d.R.
+        # gar keine Makros braucht.
+    if keyword_type == "Suspicious":
+        kw = (keyword or "").strip().lower()
+        if kw in _OLEVBA_CRITICAL_KEYWORDS:
+            return "critical"
+        if kw in _OLEVBA_HIGH_KEYWORDS:
+            return "high"
+        return "medium"
+    if keyword_type in ("Hex String", "Base64 String"):
+        return "low"  # nur Hinweis auf Obfuskierung, kein direkter Beweis
+    if keyword_type == "Dridex String":
+        return "critical"  # Dridex ist eine reale Banking-Malware-Familie mit
+        # spezifischen Obfuskierungsmustern, die olevba direkt erkennt — anders
+        # als generisches Hex/Base64 ist das kein Rauschen, sondern ein
+        # konkreter Malware-Signaturtreffer.
+    return None  # IOC, VBA String etc. — nicht als Einzelfinding, siehe meta
+
+
+def _find_office_macro_files(target: Path) -> list[Path]:
+    """Case-insensitiver Vergleich der Datei-Endung (nicht rglob-Pattern-Matching):
+    auf Linux ist rglob("*.docm") case-sensitiv und würde ein absichtlich groß
+    geschriebenes 'Invoice.DOCM' (in Windows-Umgebungen üblich, z.B. E-Mail-
+    Anhänge) unsichtbar am Scanner vorbeischleusen — verifiziert."""
+    found: list[Path] = []
+    for path in target.rglob("*"):
+        if path.is_file() and path.suffix.lower() in _OFFICE_MACRO_EXTENSIONS:
+            found.append(path)
+    return sorted(set(found))
+
+
+def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+    """Scannt alle Office-Dateien mit Makro-fähiger Endung (.doc*/.xls*/.ppt*)
+    im Zielverzeichnis auf VBA-Makros und deren verdächtige API-Aufrufe.
+    Läuft pro Datei einzeln (olevba -r über einen ganzen Ordner würde JEDE
+    Textdatei als Pseudo-Makro einlesen und massives Rauschen erzeugen —
+    verifiziert; deshalb gezielte Dateisuche statt rekursivem Tool-Flag)."""
+    findings: list[Finding] = []
+    meta: dict[str, Any] = {
+        "tool": "olevba", "ran": False, "error": None,
+        "files_scanned": 0, "ioc_count_not_reported_as_findings": 0,
+    }
+
+    if shutil.which("olevba") is None:
+        meta["error"] = "olevba not found in PATH"
+        return findings, meta
+
+    office_files = _find_office_macro_files(target)
+    meta["ran"] = True
+    if not office_files:
+        meta["note"] = "keine Office-Dateien mit Makro-fähiger Endung gefunden"
+        meta["finding_count"] = 0
+        return findings, meta
+
+    for office_file in office_files:
+        rel_path = str(office_file.relative_to(target)) if office_file.is_relative_to(target) else str(office_file)
+        ok, out, err = run_tool(
+            "olevba", ["olevba", "-j", "--", str(office_file)],
+            cwd=target, timeout=180,
+        )
+        meta["files_scanned"] += 1
+        if not ok:
+            meta.setdefault("file_errors", {})[rel_path] = err
+            continue
+        try:
+            entries = json.loads(out)
+        except json.JSONDecodeError as e:
+            meta.setdefault("file_errors", {})[rel_path] = f"could not parse olevba json: {e}"
+            continue
+        if not isinstance(entries, list):
+            meta.setdefault("file_errors", {})[rel_path] = "unexpected olevba output shape"
+            continue
+
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") == "MetaInformation":
+                continue
+            if entry.get("type") == "msg":
+                # olevba's own internal-crash channel (e.g. malformed/malicious OLE
+                # header): valid JSON, but no 'macros'/'analysis' for this file at
+                # all. Silently treating this as "no findings" would fail-open
+                # exactly on the files most likely to be a deliberately broken
+                # malware sample — must surface as a visible error instead.
+                # NOTE: olevba also emits benign informational WARNING-level msg
+                # entries on otherwise fully-successful scans (e.g. "VBA stomping
+                # cannot be detected for files in memory") — verified these do
+                # NOT indicate a failed scan (the same file still yields real
+                # findings alongside them), so only ERROR+ level is a real failure.
+                level = entry.get("level", "ERROR")
+                if level == "WARNING":
+                    continue
+                msg = entry.get("msg", "unknown olevba internal message")
+                meta.setdefault("file_errors", {})[rel_path] = f"olevba internal {level}: {msg}"
+                continue
+            if entry.get("error"):
+                meta.setdefault("file_errors", {})[rel_path] = entry["error"]
+                continue
+            for item in (entry.get("analysis") or []):
+                keyword_type = item.get("type", "")
+                keyword = item.get("keyword", "")
+                if keyword_type == "IOC":
+                    meta["ioc_count_not_reported_as_findings"] += 1
+                    continue
+                severity = _olevba_finding_severity(keyword_type, keyword)
+                if severity is None:
+                    continue
+                findings.append(Finding(
+                    tool="olevba",
+                    severity=severity,
+                    rule_id=f"olevba.{keyword_type.lower().replace(' ', '_')}.{keyword}"[:120],
+                    title=f"VBA-Makro in {rel_path}: {item.get('description', keyword_type)}",
+                    file=rel_path,
+                    line=None,
+                    category="malware",
+                    description=f"Keyword: {keyword!r} | {item.get('description', '')}"[:800],
+                    raw=item,
+                ))
+
+    meta["finding_count"] = len(findings)
+    if meta["files_scanned"] and not findings:
+        if meta.get("file_errors"):
+            # Genau der Fall, den der Crash-Fix oben abfängt: irreführend, "note"
+            # nach Fehlern klingen zu lassen wie "alles geprüft, sauber" — die
+            # betroffene(n) Datei(en) wurden effektiv NICHT durchsucht.
+            meta["note"] = ("Achtung: bei "
+                             f"{len(meta['file_errors'])} Datei(en) ist olevba "
+                             "abgebrochen (siehe tools.olevba.file_errors) — "
+                             "'0 Findings' bezieht sich nur auf die restlichen, "
+                             "erfolgreich gescannten Dateien, nicht auf diese.")
+        else:
+            meta["note"] = "Office-Dateien gefunden, keine AutoExec/Suspicious/obfuskierten Makro-Inhalte"
+    return findings, meta
+
+
 def compute_criticality(findings: list[Finding]) -> dict[str, Any]:
     scored = [f for f in findings if not f.excluded_from_score]
     excluded_count = len(findings) - len(scored)
@@ -904,7 +1081,7 @@ def main() -> int:
 
         tool_meta: dict[str, Any] = {}
 
-        print("[0/6] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
+        print("[0/7] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
         malware_findings, m = scan_guarddog(target)
         _relativize_findings(malware_findings, target)
         tool_meta["guarddog"] = m
@@ -938,39 +1115,48 @@ def main() -> int:
         all_findings: list[Finding] = list(malware_findings)
 
 
-        print("[1/6] bearer (SAST + Privacy)...")
+        print("[1/7] bearer (SAST + Privacy)...")
         f, m = scan_bearer(target, out_dir / "_bearer_raw.json")
         all_findings += f
         tool_meta["bearer"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[2/6] trufflehog (secrets, inkl. Git-History wenn möglich)...")
+        print("[2/7] trufflehog (secrets, inkl. Git-History wenn möglich)...")
         f, m = scan_trufflehog(target)
         all_findings += f
         tool_meta["trufflehog"] = m
         print(f"      -> {m.get('finding_count', 0)} findings [{m.get('mode')}]"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[3/6] trivy (dependency CVEs)...")
+        print("[3/7] trivy (dependency CVEs)...")
         f, m = scan_trivy(target)
         all_findings += f
         tool_meta["trivy"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[4/6] trivy (Docker-Base-Image-CVEs, falls Dockerfile vorhanden)...")
+        print("[4/7] trivy (Docker-Base-Image-CVEs, falls Dockerfile vorhanden)...")
         f, m = scan_trivy_docker_images(target)
         all_findings += f
         tool_meta["trivy_docker_images"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" [images: {', '.join(m.get('images_checked', [])) or '-'}]"))
 
-        print("[5/6] checkov (IaC)...")
+        print("[5/7] checkov (IaC)...")
         f, m = scan_checkov(target)
         all_findings += f
         tool_meta["checkov"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
+              + (f" (ERROR: {m['error']})" if m.get("error") else ""))
+
+        print("[6/7] olevba (Office-VBA-Makros, falls .doc*/.xls*/.ppt* vorhanden)...")
+        f, m = scan_olevba(target)
+        all_findings += f
+        tool_meta["olevba"] = m
+        print(f"      -> {m.get('finding_count', 0)} findings"
+              + (f" [{m.get('files_scanned', 0)} Datei(en) geprüft]"
+                 if m.get("ran") else "")
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
         _relativize_findings(all_findings, target)
