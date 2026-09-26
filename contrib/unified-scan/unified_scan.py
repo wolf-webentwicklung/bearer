@@ -149,6 +149,10 @@ class Finding:
     excluded_from_score: bool = False
     original_severity: str | None = None  # set when severity_policy.json changed the severity
     policy_reason: str | None = None
+    # Dependency findings (trivy): lets a consumer group CVEs per package and suggest the update.
+    package: str | None = None
+    installed_version: str | None = None
+    fixed_version: str | None = None
 
     def __post_init__(self) -> None:
         self.excluded_from_score = _excluded_from_score(self.severity, self.category, self.file)
@@ -166,6 +170,9 @@ class Finding:
             "excluded_from_score": self.excluded_from_score,
             "original_severity": self.original_severity,
             "policy_reason": self.policy_reason,
+            "package": self.package,
+            "installed_version": self.installed_version,
+            "fixed_version": self.fixed_version,
         }
 
 
@@ -731,6 +738,15 @@ def scan_trufflehog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 # Trivy (Dependency-CVEs / SCA + Docker-Base-Image-CVEs)
 # ---------------------------------------------------------------------------
 
+def _trivy_package_fields(vuln: dict[str, Any]) -> dict[str, str | None]:
+    # FixedVersion can list several branches ("2.2.5, 2.3.2") - kept as trivy reports it.
+    return {
+        "package": vuln.get("PkgName") or None,
+        "installed_version": vuln.get("InstalledVersion") or None,
+        "fixed_version": vuln.get("FixedVersion") or None,
+    }
+
+
 def scan_trivy(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     meta = {"tool": "trivy", "ran": False, "error": None}
@@ -766,6 +782,7 @@ def scan_trivy(target: Path) -> tuple[list[Finding], dict[str, Any]]:
                 category="dependency",
                 description=(vuln.get("Title") or vuln.get("Description") or "")[:500],
                 raw=vuln,
+                **_trivy_package_fields(vuln),
             ))
     meta["finding_count"] = len(findings)
     if not findings and not meta["error"]:
@@ -847,6 +864,7 @@ def scan_trivy_docker_images(target: Path) -> tuple[list[Finding], dict[str, Any
                     category="dependency",
                     description=(vuln.get("Title") or vuln.get("Description") or "")[:500],
                     raw=vuln,
+                    **_trivy_package_fields(vuln),
                 ))
     meta["ran"] = True
     meta["finding_count"] = len(findings)

@@ -363,6 +363,13 @@ Bekannte Lücken von Bearer selbst (nicht von der Policy): im Korpus nicht erkan
 hartcodiertes Passwort in einem Connection-String, zusammengesetztes SQL mit `sqlite3`,
 `yaml.load` mit unsicherem Loader und `child_process.exec`/`eval` in Node.
 
+## Paket-Felder bei Dependency-Funden
+
+trivy-Funde (`trivy`, `trivy-image`) tragen zusätzlich `package`, `installed_version` und
+`fixed_version` (so wie trivy sie meldet, z.B. `"2.2.5, 2.3.2"` bei mehreren Versionszweigen,
+`null` wenn es noch keinen Fix gibt). Damit kann ein Verbraucher die CVEs pro Paket bündeln
+und die nötige Update-Version anzeigen. Bei allen anderen Tools sind die Felder `null`.
+
 ## Test-Code-Filter
 
 Findings in echten Test-Pfaden (`test/`, `tests/`, `__tests__/`, `spec/`,
