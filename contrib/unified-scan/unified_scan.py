@@ -27,6 +27,9 @@ Ziel kann sein:
     nie in Git war, funktioniert genauso)
   - eine Git-URL (GitHub, GitLab, beliebiger Git-Host, https:// oder git@)
     -> wird automatisch geklont, danach gescannt, danach aufgeräumt
+  - ein .zip-/.7z-Archiv
+    -> wird sicher in ein Temp-Verzeichnis entpackt (safe_extract.py),
+       danach gescannt, danach aufgeräumt
 
 Ist das Ziel ein Git-Repo (lokal geklont oder direkt vorhanden), scannt
 trufflehog zusätzlich die komplette Git-History (nicht nur den aktuellen
@@ -50,6 +53,10 @@ Nutzung:
   python3 unified_scan.py /pfad/zum/projekt [--out report_dir]
   python3 unified_scan.py https://github.com/org/repo.git [--out report_dir]
   python3 unified_scan.py git@gitlab.com:org/repo.git [--out report_dir]
+  python3 unified_scan.py tool.zip [--out report_dir]
+
+Exit-Codes: 0 = ok, 1 = mind. ein critical-Finding, 2 = Ziel nicht auflösbar,
+3 = Archiv abgelehnt (unsicher/ungültig, Grund auf stderr).
 
 Erfordert im PATH: bearer, trufflehog, trivy, checkov, guarddog, git
 (fehlende Tools werden übersprungen, nicht fatal - Report vermerkt das,
@@ -67,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -76,6 +84,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from safe_extract import ArchiveRejected, safe_extract
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +207,95 @@ def is_git_repo(path: Path) -> bool:
     return ok and out.strip() == "true"
 
 
+ARCHIVE_SUFFIXES = (".zip", ".7z")
+
+# Entries in an untrusted .git that make git read outside the repo or run commands.
+_GIT_UNSAFE_PATHS = ("hooks", "config.worktree", "commondir",
+                     "objects/info/alternates", "objects/info/http-alternates")
+_GIT_CONFIG_KEEP = {
+    "core": {"repositoryformatversion", "bare", "filemode", "ignorecase",
+             "precomposeunicode", "logallrefupdates"},
+    "extensions": {"objectformat", "refstorage"},
+}
+
+
+def _sanitize_git_config(text: str) -> str:
+    """Keeps only harmless [core]/[extensions] keys - drops include, fsmonitor, filter/diff
+    drivers, hooksPath and everything else that could run a command or point elsewhere."""
+    out: list[str] = []
+    section = None
+    for line in text.splitlines():
+        header = re.match(r"^\s*\[\s*([A-Za-z0-9.-]+)", line)
+        if header:
+            section = header.group(1).lower()
+            if section in _GIT_CONFIG_KEEP and not re.search(r'"', line):
+                out.append(f"[{section}]")
+            else:
+                section = None
+            continue
+        # Plain `key = simple-value` only: no continuation lines, quotes or odd syntax.
+        key = re.match(r"^\s*([A-Za-z0-9-]+)\s*=\s*([A-Za-z0-9._-]+)\s*$", line)
+        if section and key and key.group(1).lower() in _GIT_CONFIG_KEEP[section]:
+            out.append(f"\t{key.group(1)} = {key.group(2)}")
+    return "\n".join(out) + "\n"
+
+
+def _sanitize_git_dirs(root: Path) -> None:
+    """Archive content is untrusted: a `.git` *file* (gitdir: /elsewhere), alternates or a
+    crafted config would let git/trufflehog read files outside the archive or run commands."""
+    for git in sorted(root.rglob(".git"), key=lambda p: len(p.parts), reverse=True):
+        if not git.is_dir():
+            git.unlink(missing_ok=True)
+            continue
+        for rel in _GIT_UNSAFE_PATHS:
+            victim = git / rel
+            if victim.is_dir():
+                shutil.rmtree(victim)
+            elif victim.exists():
+                victim.unlink()
+        config = git / "config"
+        if config.is_file():
+            config.write_text(_sanitize_git_config(config.read_text(errors="ignore")))
+
+
+def _harden_git_env(target: Path) -> None:
+    """Belt and braces on top of _sanitize_git_dirs: command-line config wins over repo config."""
+    overrides = {"core.fsmonitor": "false", "core.hooksPath": "/dev/null"}
+    os.environ["GIT_CONFIG_COUNT"] = str(len(overrides))
+    for i, (key, value) in enumerate(overrides.items()):
+        os.environ[f"GIT_CONFIG_KEY_{i}"] = key
+        os.environ[f"GIT_CONFIG_VALUE_{i}"] = value
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    os.environ["GIT_CEILING_DIRECTORIES"] = str(target.parent)
+
+
+def _relative_file(file: str | None, target: Path) -> str | None:
+    """Tools report paths differently (absolute, `/Dockerfile`, `./x`, file://) - normalize to
+    relative to the scan root, so reports never leak temp paths and stay comparable between
+    runs (e.g. an archive re-uploaded after a fix)."""
+    if not file:
+        return file
+    f = file.replace("\\", "/")
+    if f.startswith("file://"):
+        f = f[len("file://"):]
+    roots = {str(target), str(target.resolve()), os.path.realpath(target)}
+    for r in sorted(roots, key=len, reverse=True):
+        r = r.rstrip("/") + "/"
+        if f.startswith(r):
+            return f[len(r):]
+    if f.startswith("/") and (target / f.lstrip("/")).exists():
+        return f.lstrip("/")
+    if f.startswith("./"):
+        return f[2:]
+    return f
+
+
+def _relativize_findings(findings: list[Finding], target: Path) -> None:
+    for f in findings:
+        f.file = _relative_file(f.file, target)
+        f.excluded_from_score = _is_noise_path(f.file)
+
+
 def resolve_target(target_arg: str) -> tuple[Path, tempfile.TemporaryDirectory | None, str]:
     """
     Gibt (lokaler_pfad, tempdir_handle_oder_None, quelle_beschreibung) zurück.
@@ -219,6 +318,18 @@ def resolve_target(target_arg: str) -> tuple[Path, tempfile.TemporaryDirectory |
         return clone_dir, tmp, f"git-clone von {target_arg}"
 
     path = Path(target_arg).resolve()
+    if path.is_file() and path.suffix.lower() in ARCHIVE_SUFFIXES:
+        tmp = tempfile.TemporaryDirectory(prefix="unified-scan-archive-")
+        extract_dir = Path(tmp.name) / "src"
+        try:
+            safe_extract(path, extract_dir, path.name)
+            _sanitize_git_dirs(extract_dir)
+        except BaseException:
+            tmp.cleanup()
+            raise
+        _harden_git_env(extract_dir)
+        return extract_dir, tmp, "archive"
+
     if not path.is_dir():
         raise RuntimeError(f"{path} ist kein Verzeichnis und keine erkennbare Git-URL")
     kind = "lokales Git-Repo" if is_git_repo(path) else "lokaler Ordner (kein Git)"
@@ -584,7 +695,9 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
             severity=severity,
             rule_id=rule_id,
             title=f"{ecosystem}-Paket {dep}@{version}: Risiko-Einstufung '{label}'",
-            file=result.get("path") or f"{ecosystem}:{dep}",
+            # result["path"] is guarddog's own temp download dir of the package (differs
+            # every run, gone afterwards) - the package name is the stable location.
+            file=f"{ecosystem}:{dep}",
             line=None,
             category="malware",
             description=(f"GuardDog-Score {risk.get('score', 0)}. "
@@ -773,6 +886,9 @@ def main() -> int:
 
     try:
         target, tmp_handle, source_kind = resolve_target(args.target)
+    except ArchiveRejected as e:
+        print(f"Archiv abgelehnt: {e}", file=sys.stderr)
+        return 3
     except RuntimeError as e:
         print(f"Fehler: {e}", file=sys.stderr)
         return 2
@@ -790,6 +906,7 @@ def main() -> int:
 
         print("[0/6] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
         malware_findings, m = scan_guarddog(target)
+        _relativize_findings(malware_findings, target)
         tool_meta["guarddog"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
@@ -856,6 +973,7 @@ def main() -> int:
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
+        _relativize_findings(all_findings, target)
         criticality = compute_criticality(all_findings)
 
         combined = {
