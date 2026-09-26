@@ -1,0 +1,27 @@
+patterns:
+  - pattern: eval($<CODE>)
+    filters:
+      - not:
+          variable: CODE
+          regex: \A(["'][^"']*["']|`[^`$]*`)\z
+  - pattern: new Function($<...>$<CODE>)
+    filters:
+      - not:
+          variable: CODE
+          regex: \A(["'][^"']*["']|`[^`$]*`)\z
+languages:
+  - javascript
+severity: critical
+metadata:
+  description: Code built from variables is executed
+  remediation_message: |-
+    ## Description
+
+    eval / new Function run a string as code. If a part of it comes from outside, any code can be run.
+
+    ## Remediations
+
+    - **Do** not execute strings as code; parse data with JSON.parse or use a fixed function.
+  cwe_id:
+    - 95
+  id: idv_javascript_eval_dynamic

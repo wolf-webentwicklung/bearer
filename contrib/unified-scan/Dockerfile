@@ -59,6 +59,11 @@ ENV TRIVY_CACHE_DIR=/opt/trivy-cache
 RUN if [ "$TRIVY_BAKE_DB" = "1" ]; then trivy image --download-db-only --cache-dir /opt/trivy-cache; fi \
     && mkdir -p /opt/trivy-cache && chmod -R a+rX /opt/trivy-cache
 
+# Own rules for patterns the default rules miss (see custom-rules/). Same directory as the
+# default rules on purpose: bearer resolves `imports` (shared rules) only within one rule dir.
+COPY custom-rules/ /opt/bearer-rules/idv/
+RUN chmod -R a+rX /opt/bearer-rules/idv
+
 RUN useradd --create-home --uid 10001 scanner
 WORKDIR /opt/unified-scan
 COPY unified_scan.py safe_extract.py http_wrapper.py entrypoint.sh severity_policy.json ./

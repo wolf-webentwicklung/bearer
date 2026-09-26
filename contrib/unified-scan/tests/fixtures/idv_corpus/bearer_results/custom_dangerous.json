@@ -1,0 +1,406 @@
+{
+ "critical": [
+  {
+   "cwe_ids": [
+    "95"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "idv_javascript_eval_dynamic",
+   "line_number": 12,
+   "source": {
+    "column": {
+     "end": 20,
+     "start": 10
+    },
+    "end": 12,
+    "start": 12
+   },
+   "title": "Code built from variables is executed"
+  },
+  {
+   "cwe_ids": [
+    "95"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "idv_javascript_eval_dynamic",
+   "line_number": 16,
+   "source": {
+    "column": {
+     "end": 33,
+     "start": 10
+    },
+    "end": 16,
+    "start": 16
+   },
+   "title": "Code built from variables is executed"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "javascript_lang_dynamic_os_command",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 60,
+     "start": 3
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Unsanitized dynamic input in OS command"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "javascript_lang_dynamic_os_command",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 31,
+     "start": 10
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "Unsanitized dynamic input in OS command"
+  },
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_concat.py",
+   "full_filename": "/src/sql_concat.py",
+   "id": "python_lang_sql_injection",
+   "line_number": 12,
+   "source": {
+    "column": {
+     "end": 63,
+     "start": 5
+    },
+    "end": 12,
+    "start": 12
+   },
+   "title": "Unsanitized external input in SQL query"
+  },
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_concat.py",
+   "full_filename": "/src/sql_concat.py",
+   "id": "python_lang_sql_injection",
+   "line_number": 18,
+   "source": {
+    "column": {
+     "end": 64,
+     "start": 5
+    },
+    "end": 18,
+    "start": 18
+   },
+   "title": "Unsanitized external input in SQL query"
+  }
+ ],
+ "high": [
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "idv_javascript_child_process_dynamic",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 60,
+     "start": 3
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Shell command built from variables"
+  },
+  {
+   "cwe_ids": [
+    "78"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "idv_javascript_child_process_dynamic",
+   "line_number": 8,
+   "source": {
+    "column": {
+     "end": 31,
+     "start": 10
+    },
+    "end": 8,
+    "start": 8
+   },
+   "title": "Shell command built from variables"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_node.js",
+   "full_filename": "/src/conn_node.js",
+   "id": "idv_javascript_db_password_in_code",
+   "line_number": 2,
+   "source": {
+    "column": {
+     "end": 84,
+     "start": 7
+    },
+    "end": 2,
+    "start": 2
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_node.js",
+   "full_filename": "/src/conn_node.js",
+   "id": "idv_javascript_db_password_in_code",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 19,
+     "start": 13
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_concat.py",
+   "full_filename": "/src/conn_concat.py",
+   "id": "idv_python_db_password_in_code",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 88,
+     "start": 12
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_psycopg2.py",
+   "full_filename": "/src/conn_psycopg2.py",
+   "id": "idv_python_db_password_in_code",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 93,
+     "start": 8
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_pyodbc.py",
+   "full_filename": "/src/conn_pyodbc.py",
+   "id": "idv_python_db_password_in_code",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 123,
+     "start": 12
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "798"
+   ],
+   "filename": "conn_sqlalchemy.py",
+   "full_filename": "/src/conn_sqlalchemy.py",
+   "id": "idv_python_db_password_in_code",
+   "line_number": 3,
+   "source": {
+    "column": {
+     "end": 84,
+     "start": 10
+    },
+    "end": 3,
+    "start": 3
+   },
+   "title": "Database password in the code"
+  },
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "idv_python_yaml_unsafe_load",
+   "line_number": 6,
+   "source": {
+    "column": {
+     "end": 49,
+     "start": 16
+    },
+    "end": 6,
+    "start": 6
+   },
+   "title": "Unsafe YAML loading"
+  },
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "idv_python_yaml_unsafe_load",
+   "line_number": 10,
+   "source": {
+    "column": {
+     "end": 34,
+     "start": 12
+    },
+    "end": 10,
+    "start": 10
+   },
+   "title": "Unsafe YAML loading"
+  },
+  {
+   "cwe_ids": [
+    "502"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "idv_python_yaml_unsafe_load",
+   "line_number": 14,
+   "source": {
+    "column": {
+     "end": 27,
+     "start": 12
+    },
+    "end": 14,
+    "start": 14
+   },
+   "title": "Unsafe YAML loading"
+  },
+  {
+   "cwe_ids": [
+    "22"
+   ],
+   "filename": "yaml_unsafe.py",
+   "full_filename": "/src/yaml_unsafe.py",
+   "id": "python_lang_path_traversal",
+   "line_number": 5,
+   "source": {
+    "column": {
+     "end": 20,
+     "start": 10
+    },
+    "end": 5,
+    "start": 5
+   },
+   "title": "Unsanitized dynamic input in file path"
+  }
+ ],
+ "low": [
+  {
+   "cwe_ids": [
+    "532"
+   ],
+   "filename": "node_exec.js",
+   "full_filename": "/src/node_exec.js",
+   "id": "javascript_lang_logger_leak",
+   "line_number": 4,
+   "source": {
+    "column": {
+     "end": 59,
+     "start": 43
+    },
+    "end": 4,
+    "start": 4
+   },
+   "title": "Leakage of information in logger message"
+  }
+ ],
+ "medium": [
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_concat.py",
+   "full_filename": "/src/sql_concat.py",
+   "id": "idv_python_sql_string_building",
+   "line_number": 7,
+   "source": {
+    "column": {
+     "end": 92,
+     "start": 12
+    },
+    "end": 7,
+    "start": 7
+   },
+   "title": "SQL query built from strings"
+  },
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_concat.py",
+   "full_filename": "/src/sql_concat.py",
+   "id": "idv_python_sql_string_building",
+   "line_number": 12,
+   "source": {
+    "column": {
+     "end": 63,
+     "start": 5
+    },
+    "end": 12,
+    "start": 12
+   },
+   "title": "SQL query built from strings"
+  },
+  {
+   "cwe_ids": [
+    "89"
+   ],
+   "filename": "sql_concat.py",
+   "full_filename": "/src/sql_concat.py",
+   "id": "idv_python_sql_string_building",
+   "line_number": 18,
+   "source": {
+    "column": {
+     "end": 64,
+     "start": 5
+    },
+    "end": 18,
+    "start": 18
+   },
+   "title": "SQL query built from strings"
+  }
+ ]
+}
