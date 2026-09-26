@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """
-unified_scan.py — Bearer-Fork Erweiterung: kombinierter Security-Scan
+unified_scan.py — Bearer-Fork Erweiterung: kombinierter Malware- + Security-Scan
 für "vibe coded" Anwendungen.
 
-Orchestriert:
-  - bearer      (SAST + Privacy/Datenfluss)   -> Kernstärke: wo fließen sensible Daten hin
-  - trufflehog  (Secrets in Code + Git-History, falls Git-Repo vorhanden)
-  - trivy       (Dependency-CVEs / SCA, braucht Lockfile; zusätzlich Docker-Base-Image-CVEs)
-  - checkov     (IaC-Fehlkonfigurationen: Terraform/K8s/Docker/CloudFormation)
+Zwei-Stufen-Pipeline:
 
-Alle vier laufen komplett lokal, kein Cloud-Call, kein Code verlässt die
-Maschine (sofern man `bearer explain`/AI-Features NICHT nutzt, die sind
-hier bewusst nicht eingebunden).
+  Stufe 0 (Malware-Gate, läuft ZUERST):
+    - guarddog    (bösartige PyPI/npm-Pakete als Dependency: Typosquatting,
+                   verdächtige Install-Scripts, Obfuskierung, Exfiltration)
+      Findet ein high-risk-Paket -> Security-Scan (Stufe 1) läuft NICHT,
+      Pipeline stoppt sofort mit Report nur zum Malware-Fund.
+
+  Stufe 1 (Security-Scan, nur wenn Stufe 0 sauber durchläuft):
+    - bearer      (SAST + Privacy/Datenfluss)   -> Kernstärke: wo fließen sensible Daten hin
+    - trufflehog  (Secrets in Code + Git-History, falls Git-Repo vorhanden)
+    - trivy       (Dependency-CVEs / SCA, braucht Lockfile; zusätzlich Docker-Base-Image-CVEs)
+    - checkov     (IaC-Fehlkonfigurationen: Terraform/K8s/Docker/CloudFormation)
+
+Alle Tools laufen lokal, kein Cloud-Call für den gescannten Code selbst. Einzige
+Ausnahme: guarddog lädt zur Analyse die Paket-INHALTE (nicht euren Code) von
+PyPI/npm herunter — wie ein normales `pip install`/`npm install` — und fragt
+Metadaten bei der Registry ab (siehe Kommentar bei scan_guarddog()).
 
 Ziel kann sein:
   - ein lokaler Ordner (mit oder OHNE Git — z.B. ein R-Shiny-Projekt, das
@@ -42,8 +51,10 @@ Nutzung:
   python3 unified_scan.py https://github.com/org/repo.git [--out report_dir]
   python3 unified_scan.py git@gitlab.com:org/repo.git [--out report_dir]
 
-Erfordert im PATH: bearer, trufflehog, trivy, checkov, git
-(fehlende Tools werden übersprungen, nicht fatal - Report vermerkt das).
+Erfordert im PATH: bearer, trufflehog, trivy, checkov, guarddog, git
+(fehlende Tools werden übersprungen, nicht fatal - Report vermerkt das,
+außer guarddog fehlt komplett — dann läuft das Malware-Gate leer durch
+und wird im Report als nicht ausgeführt markiert, blockiert aber nicht).
 
 Bekannte Grenze: Bearer's SAST-Engine deckt aktuell JS/TS, Python, Ruby,
 Go, PHP, Java ab — KEIN R. Bei reinen R/Shiny-Projekten liefert bearer
@@ -516,8 +527,116 @@ def scan_checkov(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Kritikalitäts-Scoring (Ebene 2: interne Einschätzung)
+# GuardDog (Stufe 0 — Malware-Gate: bösartige PyPI/npm-Pakete als Dependency)
 # ---------------------------------------------------------------------------
+#
+# ACHTUNG Netzwerk: guarddog lädt zur Analyse die tatsächlichen Paket-Inhalte
+# von PyPI/npm herunter (wie ein normales `pip install`/`npm install`) und
+# fragt Metadaten bei der jeweiligen Registry ab. Das ist der einzige Schritt
+# in dieser gesamten Pipeline mit Netzwerkzugriff zur Laufzeit (Trivy lädt nur
+# vorab seine CVE-Datenbank). Es geht dabei NICHTS vom gescannten Zielcode
+# selbst nach außen — nur Paketname+Version (aus requirements.txt/package.json)
+# werden an die öffentliche Registry gesendet, exakt wie bei einer normalen
+# Installation dieser Dependency auch.
+
+_GUARDDOG_RISK_SEVERITY = {
+    "high_risk": "critical",
+    "suspicious": "high",
+    "low": "low",
+    "no_risks_detected": "info",
+}
+
+
+def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str | None]:
+    """Gibt (findings, parse_error_oder_None) zurück. Ein Parse-Fehler wird
+    NICHT stillschweigend verschluckt — bei einem Malware-GATE muss ein
+    kaputtes/unerwartetes Tool-Output sichtbar im Report auftauchen statt
+    lautlos als 'keine Findings' (fail-open) durchzugehen."""
+    findings: list[Finding] = []
+    try:
+        items = json.loads(out)
+    except json.JSONDecodeError as e:
+        return findings, f"could not parse guarddog json: {e}"
+    if not isinstance(items, list):
+        return findings, f"unexpected guarddog output shape (expected list, got {type(items).__name__})"
+
+    for item in items:
+        dep = item.get("dependency", "?")
+        version = item.get("version", "?")
+        result = item.get("result", {}) or {}
+        risk = result.get("risk_score", {}) or {}
+        label = risk.get("label", "no_risks_detected")
+        if label not in _GUARDDOG_RISK_SEVERITY:
+            # Unbekanntes Label (z.B. neue guarddog-Version) fail-closed als
+            # 'high' behandeln statt still auf 'low' zu mappen — lieber ein
+            # falscher Positiv-Fund als ein übersehener echter.
+            severity = "high"
+        else:
+            severity = _GUARDDOG_RISK_SEVERITY[label]
+        risks = result.get("risks") or []
+        if label == "no_risks_detected" and not risks:
+            continue  # kein Finding nötig, Paket unauffällig
+
+        rule_ids = [r.get("rule_id") or r.get("code") for r in risks if isinstance(r, dict)]
+        rule_id = ", ".join(sorted(set(filter(None, rule_ids)))) or f"guarddog.{label}"
+        findings.append(Finding(
+            tool="guarddog",
+            severity=severity,
+            rule_id=rule_id,
+            title=f"{ecosystem}-Paket {dep}@{version}: Risiko-Einstufung '{label}'",
+            file=result.get("path") or f"{ecosystem}:{dep}",
+            line=None,
+            category="malware",
+            description=(f"GuardDog-Score {risk.get('score', 0)}. "
+                         + "; ".join(str(r.get('message', r)) if isinstance(r, dict) else str(r)
+                                     for r in risks[:5])
+                         )[:800],
+            raw=item,
+        ))
+    return findings, None
+
+
+def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
+    """Prüft alle PyPI/npm-Dependencies im Projekt auf bösartige Pakete
+    (Typosquatting, verdächtige Install-Scripts, Daten-Exfiltration-Muster,
+    Obfuskierung) — unabhängig von bekannten CVEs (das deckt bereits Trivy ab).
+    Läuft rekursiv über das ganze Zielverzeichnis, findet requirements.txt/
+    package.json egal wo im Baum."""
+    findings: list[Finding] = []
+    meta: dict[str, Any] = {"tool": "guarddog", "ran": False, "error": None, "ecosystems_checked": []}
+
+    if shutil.which("guarddog") is None:
+        meta["error"] = "guarddog not found in PATH"
+        return findings, meta
+
+    any_ran = False
+    for ecosystem in ("pypi", "npm"):
+        ok, out, err = run_tool(
+            "guarddog",
+            ["guarddog", ecosystem, "verify", str(target), "--output-format", "json"],
+            cwd=target,
+            timeout=900,
+        )
+        if not ok:
+            meta.setdefault("ecosystem_errors", {})[ecosystem] = err
+            continue
+        any_ran = True
+        meta["ecosystems_checked"].append(ecosystem)
+        parsed, parse_error = _parse_guarddog_json(out, ecosystem)
+        findings += parsed
+        if parse_error:
+            meta.setdefault("ecosystem_errors", {})[ecosystem] = parse_error
+
+    meta["ran"] = any_ran
+    if not any_ran:
+        meta["error"] = meta.get("error") or "weder pypi- noch npm-Scan liefen erfolgreich durch"
+    meta["finding_count"] = len(findings)
+    if any_ran and not findings:
+        meta["note"] = "keine requirements.txt/package.json gefunden oder alle Pakete unauffällig"
+    return findings, meta
+
+
+
 
 def compute_criticality(findings: list[Finding]) -> dict[str, Any]:
     scored = [f for f in findings if not f.excluded_from_score]
@@ -667,38 +786,70 @@ def main() -> int:
         print(f"[unified-scan] Lokaler Arbeitspfad: {target}")
         print(f"[unified-scan] Output: {out_dir}")
 
-        all_findings: list[Finding] = []
         tool_meta: dict[str, Any] = {}
 
-        print("[1/5] bearer (SAST + Privacy)...")
+        print("[0/6] guarddog (Malware-Gate: bösartige PyPI/npm-Pakete)...")
+        malware_findings, m = scan_guarddog(target)
+        tool_meta["guarddog"] = m
+        print(f"      -> {m.get('finding_count', 0)} findings"
+              + (f" (ERROR: {m['error']})" if m.get("error") else ""))
+
+        malware_critical = [f for f in malware_findings if f.severity == "critical"]
+        if malware_critical:
+            print()
+            print(f"[unified-scan] MALWARE-GATE FEHLGESCHLAGEN: "
+                  f"{len(malware_critical)} bösartige(s) Paket(e) gefunden.")
+            print("[unified-scan] Security-Scan wird NICHT ausgeführt — "
+                  "erst Malware-Befunde klären.")
+            for f in malware_critical:
+                print(f"  - {f.title}")
+            combined = {
+                "target": args.target,
+                "source_kind": source_kind,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "gate": "malware",
+                "gate_passed": False,
+                "tools": tool_meta,
+                "employee_findings": [f.to_dict() for f in malware_findings],
+            }
+            (out_dir / "combined_report.json").write_text(json.dumps(combined, indent=2))
+            (out_dir / "employee_findings.md").write_text(
+                render_employee_markdown(malware_findings, args.target, source_kind))
+            print(f"[unified-scan] Report in: {out_dir / 'employee_findings.md'}")
+            return 1
+
+        all_findings: list[Finding] = list(malware_findings)
+
+
+        print("[1/6] bearer (SAST + Privacy)...")
         f, m = scan_bearer(target, out_dir / "_bearer_raw.json")
         all_findings += f
         tool_meta["bearer"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[2/5] trufflehog (secrets, inkl. Git-History wenn möglich)...")
+        print("[2/6] trufflehog (secrets, inkl. Git-History wenn möglich)...")
         f, m = scan_trufflehog(target)
         all_findings += f
         tool_meta["trufflehog"] = m
         print(f"      -> {m.get('finding_count', 0)} findings [{m.get('mode')}]"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[3/5] trivy (dependency CVEs)...")
+        print("[3/6] trivy (dependency CVEs)...")
         f, m = scan_trivy(target)
         all_findings += f
         tool_meta["trivy"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        print("[4/5] trivy (Docker-Base-Image-CVEs, falls Dockerfile vorhanden)...")
+        print("[4/6] trivy (Docker-Base-Image-CVEs, falls Dockerfile vorhanden)...")
         f, m = scan_trivy_docker_images(target)
         all_findings += f
         tool_meta["trivy_docker_images"] = m
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" [images: {', '.join(m.get('images_checked', [])) or '-'}]"))
 
-        print("[5/5] checkov (IaC)...")
+        print("[5/6] checkov (IaC)...")
         f, m = scan_checkov(target)
         all_findings += f
         tool_meta["checkov"] = m
@@ -711,6 +862,8 @@ def main() -> int:
             "target": args.target,
             "source_kind": source_kind,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "gate": "malware",
+            "gate_passed": True,
             "tools": tool_meta,
             "employee_findings": [f.to_dict() for f in all_findings],
             "internal_criticality": criticality,
