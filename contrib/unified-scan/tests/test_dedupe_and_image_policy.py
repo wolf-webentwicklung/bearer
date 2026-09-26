@@ -236,3 +236,28 @@ def test_bearer_rule_does_not_hit_checkov_and_vice_versa():
     f = Finding(tool="checkov", severity="medium", rule_id="CKV_X", title="t", category="iac")
     apply_severity_policy(f, rules)
     assert f.severity == "medium"
+
+
+# --- olevba event handlers / encoded strings, exception leak -------------------------------
+
+@pytest.mark.parametrize("ktype,keyword,expected", [
+    ("AutoExec", "CommandButton1_Click", "low"),     # runs only when someone clicks
+    ("AutoExec", "Frame1_DblClick", "low"),
+    ("AutoExec", "Workbook_Open", "high"),           # runs on open
+    ("AutoExec", "AutoOpen", "high"),
+    ("AutoExec", "InkPicture1_Painted", "high"),     # fires by itself - used by malware
+    ("AutoExec", "TabStrip1_Change", "high"),
+    ("Suspicious", "Hex Strings", "low"),
+    ("Suspicious", "Base64 Strings", "low"),
+    ("Suspicious", "Shell", "critical"),
+    ("Suspicious", "CreateObject", "high"),
+])
+def test_olevba_severity(ktype, keyword, expected):
+    assert unified_scan._olevba_finding_severity(ktype, keyword) == expected
+
+
+def test_exception_leak_rule_is_a_hint():
+    data = {"medium": [{"rule_id": "python_lang_exception", "title": "Leakage of sensitive data in exception message",
+                        "filename": "app/forms.py", "source": {"start": 17}}]}
+    (f,) = parse_bearer_json(data, load_severity_policy())
+    assert f.severity == "low" and f.original_severity == "medium"

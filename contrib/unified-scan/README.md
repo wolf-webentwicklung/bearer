@@ -356,6 +356,11 @@ path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz
   `top_<ökosystem>_packages.json` – wird zum Hinweis. Typosquats dieser Pakete stehen per
   Definition nicht auf der Liste und blockieren weiter, ebenso jedes andere Paket. Fehlt die
   Liste, wird nichts herabgestuft
+- **Exceptions mit Daten (`*_exception`) nur Hinweis:** betrifft Fehlermeldungen in Web-Antworten;
+  schlug in mehreren Projekten auf harmlosen Zeilen an (z.B. `super().__init__`)
+- **olevba:** Button-Handler (`*_Click`, `*_DblClick`) sind nur ein Hinweis – sie laufen erst beim
+  Klick. Andere Ereignisse (`Workbook_Open`, `AutoOpen`, `_Layout`, `_Painted` …) bleiben high.
+  Die Sammelzeile „Hex Strings“/„Base64 Strings“ ist wie einzelne kodierte Strings nur ein Hinweis
 - **nicht gelistete Regeln** behalten Bearers Schweregrad
 
 Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die
@@ -629,3 +634,12 @@ Angriffsklasse, unabhängig von der Shell.
   bis `[6/7]`) end-to-end gegen ein gemischtes Git-Repo (Python-Datei +
   2 Office-Dateien) durchlaufen, Score/Verdict korrekt aus den
   olevba-Findings berechnet.
+
+## Validierung an öffentlichen Projekten
+
+Neun öffentliche Projekte (Python-CLI, pandas-Report, Node-CLI, Flask mit Dockerfile, Express,
+PowerShell-Sammlung, Office-Makro-Beispiele, zwei absichtlich verwundbare Lern-Apps) liefen durch
+den Scanner. Übergreifende Fehlalarm-Muster, die daraus in die Policy kamen: GuardDog auf
+Top-Paketen, Checkov-Dockerfile-Hygiene, `*_exception`, olevba-Button-Handler und
+„Hex Strings“. Die verwundbaren Apps blockieren weiter (SQL-Injection, MD5-Passwörter, `yaml.load`,
+alte Pakete mit kritischen CVEs, Paket mit Netzwerkzugriff bei der Installation).

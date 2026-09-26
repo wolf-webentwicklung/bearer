@@ -1415,11 +1415,19 @@ def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
     """None bedeutet: kein eigenes Finding (z.B. IOC — zu rauschanfällig,
     siehe unten)."""
     if keyword_type == "AutoExec":
+        # olevba zählt auch Button-Handler (CommandButton1_Click) zu AutoExec – die laufen
+        # erst, wenn jemand klickt, und stecken in fast jedem Business-Makro mit Knöpfen.
+        # Andere Steuerelement-Ereignisse (_Layout, _Painted, _GotFocus …) bleiben high: die
+        # feuern teils von selbst und werden von Schad-Makros genau dafür benutzt.
+        if re.search(r"_(Dbl)?Click$", keyword or "", re.IGNORECASE):
+            return "low"
         return "high"  # Makro läuft automatisch beim Öffnen — an sich schon
         # ein Warnsignal in einem "Dashboard mit echten Daten", das i.d.R.
         # gar keine Makros braucht.
     if keyword_type == "Suspicious":
         kw = (keyword or "").strip().lower()
+        if kw in ("hex strings", "base64 strings"):
+            return "low"  # olevba's summary line for encoded strings - same as "Hex String"
         if kw in _OLEVBA_CRITICAL_KEYWORDS:
             return "critical"
         if kw in _OLEVBA_HIGH_KEYWORDS:

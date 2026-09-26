@@ -51,6 +51,12 @@
       "reason": "TLS kann per Konfiguration aktiv sein (starttls) – blockiert weiter, ist aber begründbar"
     },
     {
+      "match": "*_exception",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Fehlermeldungen/Exceptions mit Daten betreffen Web-Antworten – in internen Skripten nur Hinweis"
+    },
+    {
       "match": "*_os_command_injection",
       "mode": "set",
       "severity": "high",
