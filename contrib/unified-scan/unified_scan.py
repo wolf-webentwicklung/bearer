@@ -806,13 +806,23 @@ def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
         return "medium"
     if keyword_type in ("Hex String", "Base64 String"):
         return "low"  # nur Hinweis auf Obfuskierung, kein direkter Beweis
+    if keyword_type == "Dridex String":
+        return "critical"  # Dridex ist eine reale Banking-Malware-Familie mit
+        # spezifischen Obfuskierungsmustern, die olevba direkt erkennt — anders
+        # als generisches Hex/Base64 ist das kein Rauschen, sondern ein
+        # konkreter Malware-Signaturtreffer.
     return None  # IOC, VBA String etc. — nicht als Einzelfinding, siehe meta
 
 
 def _find_office_macro_files(target: Path) -> list[Path]:
+    """Case-insensitiver Vergleich der Datei-Endung (nicht rglob-Pattern-Matching):
+    auf Linux ist rglob("*.docm") case-sensitiv und würde ein absichtlich groß
+    geschriebenes 'Invoice.DOCM' (in Windows-Umgebungen üblich, z.B. E-Mail-
+    Anhänge) unsichtbar am Scanner vorbeischleusen — verifiziert."""
     found: list[Path] = []
-    for ext in _OFFICE_MACRO_EXTENSIONS:
-        found.extend(target.rglob(f"*{ext}"))
+    for path in target.rglob("*"):
+        if path.is_file() and path.suffix.lower() in _OFFICE_MACRO_EXTENSIONS:
+            found.append(path)
     return sorted(set(found))
 
 
@@ -840,26 +850,43 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
         return findings, meta
 
     for office_file in office_files:
+        rel_path = str(office_file.relative_to(target)) if office_file.is_relative_to(target) else str(office_file)
         ok, out, err = run_tool(
             "olevba", ["olevba", "-j", "--", str(office_file)],
             cwd=target, timeout=180,
         )
         meta["files_scanned"] += 1
         if not ok:
-            meta.setdefault("file_errors", {})[str(office_file)] = err
+            meta.setdefault("file_errors", {})[rel_path] = err
             continue
         try:
             entries = json.loads(out)
         except json.JSONDecodeError as e:
-            meta.setdefault("file_errors", {})[str(office_file)] = f"could not parse olevba json: {e}"
+            meta.setdefault("file_errors", {})[rel_path] = f"could not parse olevba json: {e}"
             continue
         if not isinstance(entries, list):
-            meta.setdefault("file_errors", {})[str(office_file)] = "unexpected olevba output shape"
+            meta.setdefault("file_errors", {})[rel_path] = "unexpected olevba output shape"
             continue
 
-        rel_path = str(office_file.relative_to(target)) if office_file.is_relative_to(target) else str(office_file)
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("type") == "MetaInformation":
+                continue
+            if entry.get("type") == "msg":
+                # olevba's own internal-crash channel (e.g. malformed/malicious OLE
+                # header): valid JSON, but no 'macros'/'analysis' for this file at
+                # all. Silently treating this as "no findings" would fail-open
+                # exactly on the files most likely to be a deliberately broken
+                # malware sample — must surface as a visible error instead.
+                # NOTE: olevba also emits benign informational WARNING-level msg
+                # entries on otherwise fully-successful scans (e.g. "VBA stomping
+                # cannot be detected for files in memory") — verified these do
+                # NOT indicate a failed scan (the same file still yields real
+                # findings alongside them), so only ERROR+ level is a real failure.
+                level = entry.get("level", "ERROR")
+                if level == "WARNING":
+                    continue
+                msg = entry.get("msg", "unknown olevba internal message")
+                meta.setdefault("file_errors", {})[rel_path] = f"olevba internal {level}: {msg}"
                 continue
             if entry.get("error"):
                 meta.setdefault("file_errors", {})[rel_path] = entry["error"]
@@ -887,7 +914,17 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 
     meta["finding_count"] = len(findings)
     if meta["files_scanned"] and not findings:
-        meta["note"] = "Office-Dateien gefunden, keine AutoExec/Suspicious/obfuskierten Makro-Inhalte"
+        if meta.get("file_errors"):
+            # Genau der Fall, den der Crash-Fix oben abfängt: irreführend, "note"
+            # nach Fehlern klingen zu lassen wie "alles geprüft, sauber" — die
+            # betroffene(n) Datei(en) wurden effektiv NICHT durchsucht.
+            meta["note"] = ("Achtung: bei "
+                             f"{len(meta['file_errors'])} Datei(en) ist olevba "
+                             "abgebrochen (siehe tools.olevba.file_errors) — "
+                             "'0 Findings' bezieht sich nur auf die restlichen, "
+                             "erfolgreich gescannten Dateien, nicht auf diese.")
+        else:
+            meta["note"] = "Office-Dateien gefunden, keine AutoExec/Suspicious/obfuskierten Makro-Inhalte"
     return findings, meta
 
 
