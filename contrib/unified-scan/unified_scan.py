@@ -575,6 +575,14 @@ def parse_bearer_json(data: dict[str, Any],
     return findings
 
 
+def drop_secret_duplicates(findings: list[Finding]) -> list[Finding]:
+    """A password our own rule reports at a line where trufflehog already reports a secret is
+    the same thing twice - keep trufflehog's (it names the kind of secret)."""
+    secrets = {(f.file, f.line) for f in findings if f.tool == "trufflehog"}
+    return [f for f in findings
+            if not (f.rule_id in CUSTOM_SECRET_RULES and (f.file, f.line) in secrets)]
+
+
 # Own Bearer rules (custom-rules/, baked into the image next to bearer-rules) for patterns the
 # default rules miss. A password written into the code is a secret like any other.
 CUSTOM_RULE_PREFIX = "idv_"
@@ -676,6 +684,15 @@ def scan_bearer(target: Path, tmp_json: Path,
 # Trufflehog (Secrets — mit Git-History wenn möglich, sonst Dateisystem)
 # ---------------------------------------------------------------------------
 
+# Template placeholders trufflehog's connection-string detectors take for a password:
+# {pw}, ${DB_PASSWORD}, %s, %(pw)s, $PW, <password>, ****.
+_PLACEHOLDER_SECRET = re.compile(r"\A(\$?\{[^{}]*\}|%(\(\w+\))?s|\$\w+|<[^<>]*>|\*+)\Z")
+
+
+def _is_placeholder_secret(raw: Any) -> bool:
+    return isinstance(raw, str) and bool(_PLACEHOLDER_SECRET.match(raw.strip()))
+
+
 def _parse_trufflehog_ndjson(out: str, git_mode: bool) -> list[Finding]:
     findings: list[Finding] = []
     for line in out.splitlines():
@@ -688,6 +705,8 @@ def _parse_trufflehog_ndjson(out: str, git_mode: bool) -> list[Finding]:
             continue
         if "SourceMetadata" not in item:
             continue  # progress/summary lines
+        if _is_placeholder_secret(item.get("Raw")):
+            continue  # e.g. "Password={pw}" - the value comes from a variable, not a secret
 
         data = item.get("SourceMetadata", {}).get("Data", {})
         if git_mode and "Git" in data:
@@ -1643,6 +1662,7 @@ def main() -> int:
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
         _relativize_findings(all_findings, target)
+        all_findings = drop_secret_duplicates(all_findings)
         criticality = compute_criticality(all_findings)
 
         combined = {
