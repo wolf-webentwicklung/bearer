@@ -613,7 +613,7 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
     for ecosystem in ("pypi", "npm"):
         ok, out, err = run_tool(
             "guarddog",
-            ["guarddog", ecosystem, "verify", str(target), "--output-format", "json"],
+            ["guarddog", ecosystem, "verify", "--output-format", "json", "--", str(target)],
             cwd=target,
             timeout=900,
         )
