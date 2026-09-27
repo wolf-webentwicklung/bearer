@@ -171,25 +171,35 @@ RANKS = {"pypi": {"pyyaml": 13, "pandas": 38, "grequests": 6926},
          "npm": {"@prisma/client": 1965}}
 
 
-def _gd(pkg, sev="critical", eco="pypi"):
+def _gd(pkg, sev="high", eco="pypi", label="suspicious"):
+    category = "malware" if label == "high_risk" else "suspicious-package"
     return Finding(tool="guarddog", severity=sev, rule_id="threat-runtime-obfuscation-general",
-                   title="t", file=f"{eco}:{pkg}", category="malware")
+                   title="t", file=f"{eco}:{pkg}", category=category,
+                   raw={"result": {"risk_score": {"label": label}}})
 
 
 @pytest.mark.parametrize("pkg,eco,expected", [
     ("PyYAML", "pypi", "low"),          # name normalised (PEP 503)
     ("pandas", "pypi", "low"),
     ("@prisma/client", "npm", "low"),
-    ("grequests", "pypi", "critical"),  # rank 6926 > 5000: stays
-    ("reqeusts", "pypi", "critical"),   # typosquat: not on the list, stays
-    ("left-pad", "npm", "critical"),
+    ("grequests", "pypi", "high"),      # rank 6926 > 5000: stays
+    ("reqeusts", "pypi", "high"),       # typosquat: not on the list, stays
+    ("left-pad", "npm", "high"),
 ])
-def test_guarddog_popular_packages_become_hints(pkg, eco, expected):
+def test_guarddog_popular_suspicious_packages_become_hints(pkg, eco, expected):
     f = _gd(pkg, eco=eco)
     apply_guarddog_popularity([f], load_guarddog_policy(), ranks=RANKS)
     assert f.severity == expected
     if expected == "low":
-        assert f.original_severity == "critical" and "Top 5000" in f.policy_reason
+        assert f.original_severity == "high" and "Top 5000" in f.policy_reason
+
+
+@pytest.mark.parametrize("pkg,eco", [("pandas", "pypi"), ("@prisma/client", "npm")])
+def test_guarddog_high_risk_never_downgraded_by_popularity(pkg, eco):
+    """Compromised releases of popular packages are the real supply-chain attacks."""
+    f = _gd(pkg, sev="critical", eco=eco, label="high_risk")
+    apply_guarddog_popularity([f], load_guarddog_policy(), ranks=RANKS)
+    assert f.severity == "critical" and f.category == "malware"
 
 
 def test_guarddog_unscannable_and_off_untouched(monkeypatch):
@@ -200,7 +210,7 @@ def test_guarddog_unscannable_and_off_untouched(monkeypatch):
     monkeypatch.setenv("UNIFIED_SCAN_SEVERITY_POLICY", "off")
     g = _gd("pandas")
     apply_guarddog_popularity([g], load_guarddog_policy(), ranks=RANKS)
-    assert g.severity == "critical"
+    assert g.severity == "high"
 
 
 def test_guarddog_missing_top_list_downgrades_nothing(monkeypatch, tmp_path):
@@ -208,7 +218,7 @@ def test_guarddog_missing_top_list_downgrades_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(unified_scan, "_top_package_ranks", lambda eco: {})
     f = _gd("pandas")
     apply_guarddog_popularity([f], load_guarddog_policy())
-    assert f.severity == "critical"
+    assert f.severity == "high"
 
 
 def test_top_package_ranks_reads_guarddog_list(monkeypatch, tmp_path):
@@ -249,8 +259,14 @@ def test_bearer_rule_does_not_hit_checkov_and_vice_versa():
     ("AutoExec", "TabStrip1_Change", "high"),
     ("Suspicious", "Hex Strings", "low"),
     ("Suspicious", "Base64 Strings", "low"),
-    ("Suspicious", "Shell", "critical"),
+    ("Suspicious", "Shell", "high"),             # everyday in business macros: justifiable
+    ("Suspicious", "WScript.Shell", "high"),
+    ("Suspicious", "MSXML2.XMLHTTP", "high"),
+    ("Suspicious", "powershell", "high"),
     ("Suspicious", "CreateObject", "high"),
+    ("Suspicious", "VirtualAlloc", "critical"),      # process injection: malware only
+    ("Suspicious", "WriteProcessMemory", "critical"),
+    ("Dridex String", "x", "critical"),
 ])
 def test_olevba_severity(ktype, keyword, expected):
     assert unified_scan._olevba_finding_severity(ktype, keyword) == expected

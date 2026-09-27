@@ -9,9 +9,10 @@
     "Blocking in gvintra: critical/high/medium block (high/medium can be justified per finding), low/info are hints only.",
     "Disable for comparison: --no-severity-policy or UNIFIED_SCAN_SEVERITY_POLICY=off. Other file: UNIFIED_SCAN_SEVERITY_POLICY_FILE=/path.json",
     "'base_image': CVEs found by trivy-image in the base image of a Dockerfile (OS packages of e.g. python:3.x-slim, not the uploaded code) become 'severity' (a hint). Exception with keep_critical_with_fix: a critical CVE that already has a fixed version keeps blocking - rebuilding the image fixes it.",
-    "Line check in unified_scan.py (not configurable here): a critical *_code_injection finding whose source line only calls setattr/getattr/delattr (no eval/exec/compile) is lowered to high.",
     "Rules may name a 'tool' (default 'bearer'); only 'bearer' and 'checkov' findings are re-rated by 'rules'.",
-    "'guarddog': a GuardDog finding on a package within the top 'trusted_top_n' of the registry's download ranking (GuardDog's own top_<ecosystem>_packages.json) becomes 'severity'. Its source-code heuristics fire constantly on big popular packages; typosquats are not on the list and keep blocking."
+    "Same class = same level across languages: every SQL-injection rule medium, every OS-command/exec rule high, every XSS/HTML-injection rule medium, every plain-text transport rule (http/ftp/ws) high, code execution (eval/code_injection/deserialization) always critical. tests/test_policy_globs.py fails if a glob matches no rule of the baked bearer-rules version.",
+    "Line check in unified_scan.py (not configurable here): a critical *_code_injection finding whose source line calls setattr/getattr/delattr and none of eval/exec/compile/__import__/importlib/os.exec*/os.spawn*/globals()[ is lowered to high.",
+    "'guarddog': only a 'suspicious' GuardDog result (heuristics) on a package within the top 'trusted_top_n' of the registry's download ranking becomes 'severity'. 'high_risk' always stays critical, however popular the package is - real supply-chain attacks hit exactly the popular packages. 'suspicious' on other packages is high and category 'suspicious-package' (can be justified); known malicious packages come from the OSV MAL-* list (category 'malware', never)."
   ],
   "rules": [
     {
@@ -22,6 +23,12 @@
     },
     {
       "match": "*_eval_user_input",
+      "mode": "min",
+      "severity": "critical",
+      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+    },
+    {
+      "match": "*_eval_dynamic",
       "mode": "min",
       "severity": "critical",
       "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
@@ -39,10 +46,34 @@
       "reason": "Einlesen fremder Objekt-Daten bleibt immer kritisch"
     },
     {
-      "match": "*_template_injection",
-      "mode": "min",
-      "severity": "critical",
-      "reason": "Ausführen von Eingaben als Code bleibt immer kritisch"
+      "match": "*_os_command_injection",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Programmaufruf mit variablen Teilen – bei festen Befehlen harmlos, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_dynamic_os_command",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Programmaufruf mit variablen Teilen – bei festen Befehlen harmlos, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_exec_using_user_input",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Programmaufruf mit variablen Teilen – bei festen Befehlen harmlos, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_subproc_*",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Programmaufruf mit variablen Teilen – bei festen Befehlen harmlos, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_child_process_dynamic",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Programmaufruf mit variablen Teilen – bei festen Befehlen harmlos, blockiert weiter, ist aber begründbar"
     },
     {
       "match": "*_insecure_smtp",
@@ -51,22 +82,40 @@
       "reason": "TLS kann per Konfiguration aktiv sein (starttls) – blockiert weiter, ist aber begründbar"
     },
     {
+      "match": "*_insecure_http",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Unverschlüsselte Verbindung (http/ftp/ws) – im internen Netz verbreitet, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_http_insecure",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Unverschlüsselte Verbindung (http/ftp/ws) – im internen Netz verbreitet, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_insecure_ftp",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Unverschlüsselte Verbindung (http/ftp/ws) – im internen Netz verbreitet, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_insecure_websocket",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Unverschlüsselte Verbindung (http/ftp/ws) – im internen Netz verbreitet, blockiert weiter, ist aber begründbar"
+    },
+    {
+      "match": "*_websocket_insecure",
+      "mode": "set",
+      "severity": "high",
+      "reason": "Unverschlüsselte Verbindung (http/ftp/ws) – im internen Netz verbreitet, blockiert weiter, ist aber begründbar"
+    },
+    {
       "match": "*_exception",
       "mode": "set",
       "severity": "low",
       "reason": "Fehlermeldungen/Exceptions mit Daten betreffen Web-Antworten – in internen Skripten nur Hinweis"
-    },
-    {
-      "match": "*_os_command_injection",
-      "mode": "set",
-      "severity": "high",
-      "reason": "Schlägt auch bei festen Befehlen ohne Shell an – blockiert weiter, ist aber begründbar"
-    },
-    {
-      "match": "*_dynamic_os_command",
-      "mode": "set",
-      "severity": "high",
-      "reason": "Schlägt auch bei festen Befehlen ohne Shell an – blockiert weiter, ist aber begründbar"
     },
     {
       "match": "*_avoid_pickle",
@@ -76,18 +125,6 @@
     },
     {
       "match": "*_hardcoded_secret",
-      "mode": "min",
-      "severity": "high",
-      "reason": "Passwörter und Schlüssel gehören nicht in den Code"
-    },
-    {
-      "match": "*_jwt_hardcoded_secret",
-      "mode": "min",
-      "severity": "high",
-      "reason": "Passwörter und Schlüssel gehören nicht in den Code"
-    },
-    {
-      "match": "*_passport_hardcoded_secret",
       "mode": "min",
       "severity": "high",
       "reason": "Passwörter und Schlüssel gehören nicht in den Code"
@@ -111,13 +148,31 @@
       "reason": "Schwach verschlüsselte Passwörter blockieren weiter"
     },
     {
+      "match": "*_weak_random",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Einfacher Zufall reicht für Auswertungen – nur für Passwörter/Tokens ungeeignet"
+    },
+    {
+      "match": "*_insufficiently_random_values",
+      "mode": "set",
+      "severity": "low",
+      "reason": "Einfacher Zufall reicht für Auswertungen – nur für Passwörter/Tokens ungeeignet"
+    },
+    {
       "match": "*_sql_injection",
       "mode": "set",
       "severity": "medium",
       "reason": "Zusammengesetztes SQL ist in Auswertungen üblich – begründbar, wenn die Eingabe fest ist"
     },
     {
-      "match": "*_sql_user_input",
+      "match": "*_sqli",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Zusammengesetztes SQL ist in Auswertungen üblich – begründbar, wenn die Eingabe fest ist"
+    },
+    {
+      "match": "*_sql_string_building",
       "mode": "set",
       "severity": "medium",
       "reason": "Zusammengesetztes SQL ist in Auswertungen üblich – begründbar, wenn die Eingabe fest ist"
@@ -135,13 +190,43 @@
       "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
     },
     {
+      "match": "*_template_injection",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
       "match": "*_raw_html_using_user_input",
       "mode": "set",
       "severity": "medium",
       "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
     },
     {
-      "match": "*_html_user_input",
+      "match": "*_dangerous_insert_html",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_dangerously_set_inner_html",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_html_tag_injection",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_xss_*",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
+    },
+    {
+      "match": "*_reflected_xss",
       "mode": "set",
       "severity": "medium",
       "reason": "Nur bei Tools mit Weboberfläche relevant – sonst begründbar"
@@ -165,6 +250,12 @@
       "reason": "Nur relevant, wenn Fremde die Adresse bestimmen – sonst begründbar"
     },
     {
+      "match": "*_path_using_user_input",
+      "mode": "set",
+      "severity": "medium",
+      "reason": "Dateipfad aus Web-Anfrage – nur relevant bei Weboberfläche, sonst begründbar"
+    },
+    {
       "match": "*_path_traversal",
       "mode": "set",
       "severity": "low",
@@ -172,12 +263,6 @@
     },
     {
       "match": "*_non_literal_fs_filename",
-      "mode": "set",
-      "severity": "low",
-      "reason": "Dateipfade aus Aufruf oder Konfiguration sind bei Skripten normal"
-    },
-    {
-      "match": "*_path_using_user_input",
       "mode": "set",
       "severity": "low",
       "reason": "Dateipfade aus Aufruf oder Konfiguration sind bei Skripten normal"
@@ -307,6 +392,6 @@
   "guarddog": {
     "trusted_top_n": 5000,
     "severity": "low",
-    "reason": "Weit verbreitetes Paket (Top 5000 der Registry) – GuardDogs Code-Muster sind hier fast immer Fehlalarme"
+    "reason": "Weit verbreitetes Paket (Top 5000 der Registry) – GuardDogs Code-Heuristiken sind hier fast immer Fehlalarme"
   }
 }

@@ -3,22 +3,23 @@
 unified_scan.py — Bearer-Fork Erweiterung: kombinierter Malware- + Security-Scan
 für "vibe coded" Anwendungen.
 
-Zwei-Stufen-Pipeline:
+Pipeline (alle Stufen laufen immer, auch wenn das Malware-Gate anschlägt – sonst
+würden echte Code-Lücken hinter einem einzelnen Paket-Fund verschwinden):
 
-  Stufe 0 (Malware-Gate, läuft ZUERST):
-    - guarddog    (bösartige PyPI/npm-Pakete als Dependency: Typosquatting,
-                   verdächtige Install-Scripts, Obfuskierung, Exfiltration)
-      Findet ein high-risk-Paket -> Security-Scan (Stufe 1) läuft NICHT,
-      Pipeline stoppt sofort mit Report nur zum Malware-Fund.
+  Malware-Gate (gate_passed=false bei critical + Kategorie malware):
+    - guarddog    (Heuristiken auf PyPI/npm-Abhängigkeiten: Install-Scripts,
+                   Obfuskierung, Exfiltration). high_risk -> critical/malware,
+                   suspicious -> high/suspicious-package (begründbar)
+    - osv         (bekannte Schadpakete aus der OSV-Datenbank, MAL-*-Einträge,
+                   offline-Index aus dem Image-Bau) -> critical/malware
+    - verschachtelte Archive -> critical/unscannable
 
-  Stufe 1 (Security-Scan, nur wenn Stufe 0 sauber durchläuft):
-    - bearer      (SAST + Privacy/Datenfluss)   -> Kernstärke: wo fließen sensible Daten hin
-    - trufflehog  (Secrets in Code + Git-History, falls Git-Repo vorhanden)
+  Code- und Konfigurations-Prüfung:
+    - bearer      (SAST + Privacy/Datenfluss, Schweregrade per severity_policy.json)
+    - trufflehog  (Secrets im aktuellen Dateistand, zusätzlich Git-History)
     - trivy       (Dependency-CVEs / SCA, braucht Lockfile; zusätzlich Docker-Base-Image-CVEs)
     - checkov     (IaC-Fehlkonfigurationen: Terraform/K8s/Docker/CloudFormation)
-    - olevba      (Office-VBA-Makros: .doc*/.xls*/.ppt* — AutoExec, Shell/
-                   PowerShell-Aufrufe, Obfuskierung; deckt eine Lücke ab, die
-                   keines der anderen Tools abdeckt)
+    - olevba      (Office-VBA-Makros und VBA/VBScript-Quelltexte .bas/.cls/.frm/.vbs)
 
 Alle Tools laufen lokal, kein Cloud-Call für den gescannten Code selbst. Einzige
 Ausnahme: guarddog lädt zur Analyse die Paket-INHALTE (nicht euren Code) von
@@ -44,8 +45,9 @@ Output: zwei Report-Ebenen in einem JSON, plus lesbares Markdown je Ebene.
   1. "employee_findings"   -> was MUSS gefixt werden bevor live geht
                               (nur tatsächlich actionable Findings,
                                nach Severity sortiert, mit Datei:Zeile;
-                               Test-/Beispielcode ist markiert, fließt
-                               aber nicht in den Kritikalitäts-Score ein)
+                               echter Testcode - Testpfad UND Test-Framework
+                               in der Datei - ist markiert und fließt nicht in
+                               den Kritikalitäts-Score ein)
 
   2. "internal_criticality" -> interne Kritikalitäts-Einschätzung
                                (Scoring 0-100, Kategorie-Breakdown,
@@ -62,9 +64,8 @@ Exit-Codes: 0 = ok, 1 = mind. ein critical-Finding, 2 = Ziel nicht auflösbar,
 3 = Archiv abgelehnt (unsicher/ungültig, Grund auf stderr).
 
 Erfordert im PATH: bearer, trufflehog, trivy, checkov, guarddog, olevba, git
-(fehlende Tools werden übersprungen, nicht fatal - Report vermerkt das,
-außer guarddog fehlt komplett — dann läuft das Malware-Gate leer durch
-und wird im Report als nicht ausgeführt markiert, blockiert aber nicht).
+(fehlende Tools werden übersprungen und im Report unter tools.<name>.error
+vermerkt; der HTTP-Wrapper meldet sie als failed_tools bzw. core_failed_tools).
 
 Bekannte Grenze: Bearer's SAST-Engine deckt aktuell JS/TS, Python, Ruby,
 Go, PHP, Java ab — KEIN R. Bei reinen R/Shiny-Projekten liefert bearer
@@ -130,9 +131,61 @@ def _is_noise_path(path: str | None) -> bool:
 
 
 def _excluded_from_score(severity: str, category: str, path: str | None) -> bool:
+    """Path-based pre-check only. refine_test_exemption() later keeps the exemption solely for
+    files whose content is really a test - a folder name alone is chosen by the uploader."""
     if severity == "critical" or category in NEVER_EXCLUDED_CATEGORIES:
         return False
     return _is_noise_path(path)
+
+
+# Test framework markers per language. A file under tests/ (or named test_*.py ...) only counts
+# as test code when it also uses a test framework - otherwise any code could be parked in a
+# folder called tests/ to switch its findings off.
+_TEST_CONTENT_MARKERS = (
+    (re.compile(r"\.py$", re.I),
+     re.compile(r"^\s*(?:import|from)\s+(?:pytest|unittest|nose2?|hypothesis)\b", re.M)),
+    (re.compile(r"\.[cm]?[jt]sx?$", re.I),
+     re.compile(r"(?:require\(\s*|from\s+|import\s+)['\"](?:vitest|mocha|chai|jest|@jest/[\w-]+|"
+                r"@testing-library/[\w-]+|node:test|ava|tap|jasmine)['\"]"
+                r"|^\s*(?:describe|it|test)\s*\(\s*['\"`]", re.M)),
+    (re.compile(r"_test\.go$", re.I), re.compile(r"^\s*\"testing\"|\bimport\s+\"testing\"", re.M)),
+    (re.compile(r"\.rb$", re.I), re.compile(r"^\s*(?:require\s+['\"](?:rspec|minitest|test/unit)|"
+                                            r"(?:RSpec\.)?describe\b)", re.M)),
+    (re.compile(r"\.java$", re.I), re.compile(r"^\s*import\s+(?:static\s+)?org\.(?:junit|testng)\.", re.M)),
+    (re.compile(r"\.php$", re.I), re.compile(r"PHPUnit\\Framework|extends\s+TestCase\b")),
+)
+_TEST_READ_BYTES = 256 * 1024
+
+
+def _is_test_file(target: Path, rel: str, cache: dict[str, bool]) -> bool:
+    if rel in cache:
+        return cache[rel]
+    result = False
+    root = target.resolve()
+    try:
+        path = (root / rel).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            with path.open("rb") as fh:
+                text = fh.read(_TEST_READ_BYTES).decode("utf-8", errors="ignore")
+            for name_re, content_re in _TEST_CONTENT_MARKERS:
+                if name_re.search(rel) and content_re.search(text):
+                    result = True
+                    break
+    except OSError:
+        result = False
+    cache[rel] = result
+    return result
+
+
+def refine_test_exemption(findings: list["Finding"], target: Path) -> None:
+    """Final say on excluded_from_score (runs after every severity change): path looks like a
+    test AND the file uses a test framework. Otherwise the finding counts normally."""
+    cache: dict[str, bool] = {}
+    for f in findings:
+        if not _excluded_from_score(f.severity, f.category, f.file):
+            f.excluded_from_score = False
+            continue
+        f.excluded_from_score = _is_test_file(target, f.file, cache)
 
 
 @dataclass
@@ -413,12 +466,32 @@ def _zip_names(path: Path) -> list[str] | None:
         return None
 
 
+# Main part that a real OOXML document of each kind has. A ZIP that merely contains a file
+# called [Content_Types].xml is not a document.
+_OOXML_MAIN_PARTS = ("word/document.xml", "word/document2.xml", "xl/workbook.xml", "xl/workbook.bin",
+                     "ppt/presentation.xml", "visio/document.xml")
+# Nothing a real Office/ODF document contains - but exactly what someone would hide in a ZIP
+# dressed up as one.
+_NOT_IN_DOCUMENTS = re.compile(
+    r"\.(?:py|pyw|pyc|js|mjs|cjs|ts|tsx|jsx|ps1|psm1|psd1|bat|cmd|sh|bash|vbs|vbe|wsf|hta|"
+    r"exe|dll|scr|com|msi|jar|war|class|rb|php|pl|go|java|cs|lnk|zip|7z|rar|gz|tgz|tar|bz2|xz)$",
+    re.IGNORECASE,
+)
+
+
 def _is_office_or_odf_zip(names: list[str] | None) -> bool:
     """OOXML (.docx/.xlsm ...) and ODF documents are ZIP containers, but documents - not
-    archives someone packed code into. Macros in them are olevba's job."""
+    archives someone packed code into. Macros in them are olevba's job. Only a structurally
+    real document counts: OOXML needs [Content_Types].xml plus its main part, ODF needs
+    'mimetype' as first entry plus content.xml - and neither may carry scripts/executables."""
     if not names:
         return False
-    return "[Content_Types].xml" in names or "mimetype" in names
+    if any(_NOT_IN_DOCUMENTS.search(n) for n in names):
+        return False
+    lowered = {n.lower() for n in names}
+    if "[content_types].xml" in lowered and any(part in lowered for part in _OOXML_MAIN_PARTS):
+        return True
+    return names[0] == "mimetype" and "content.xml" in lowered
 
 
 def _iter_files(target: Path):
@@ -451,7 +524,7 @@ def scan_nested_archives(target: Path) -> tuple[list[Finding], dict[str, Any]]:
             file=rel,
             line=None,
             category="unscannable",
-            description="Nested archive not scanned - upload its content unpacked instead.",
+            description="Der Inhalt verschachtelter Archive wird nicht geprüft – bitte entpackt hochladen.",
         ))
     meta["finding_count"] = len(findings)
     return findings, meta
@@ -589,7 +662,12 @@ def apply_base_image_policy(finding: Finding, policy: dict[str, Any]) -> None:
 # Bearer's *_code_injection also fires on setattr/getattr/delattr with a dynamic attribute
 # name - that sets/reads a field, it doesn't run code. eval/exec/compile stay critical.
 _ATTR_ACCESS_CALL = re.compile(r"\b(?:setattr|getattr|delattr)\s*\(")
-_CODE_EXEC_CALL = re.compile(r"\b(?:eval|exec|compile|__import__|execfile)\s*\(")
+_CODE_EXEC_CALL = re.compile(
+    r"\b(?:eval|exec|compile|__import__|execfile|import_module|run_path|run_module)\s*\("
+    r"|\bos\.(?:exec|spawn|popen|system)\w*\s*\("
+    r"|\b(?:globals|locals|vars)\s*\(\s*\)\s*\["
+    r"|\bgetattr\s*\(\s*(?:builtins|__builtins__|os|subprocess|importlib)\b"
+)
 ATTR_ACCESS_REASON = ("Dynamischer Attributzugriff (setattr/getattr) führt keinen Code aus – "
                       "blockiert weiter, ist aber begründbar")
 
@@ -614,7 +692,9 @@ def _source_line(target: Path, file: str | None, line: int | None) -> str | None
 
 def refine_code_injection(findings: list[Finding], target: Path) -> None:
     """Looks at the reported source line of each critical *_code_injection finding. A line
-    that only does setattr/getattr/delattr (and no eval/exec/compile) is lowered to high."""
+    that does setattr/getattr/delattr and none of the code-execution patterns above (eval,
+    exec, compile, __import__, importlib, os.exec*/spawn*, globals()[...], getattr on builtins/
+    os/subprocess) is lowered to high."""
     for f in findings:
         if f.tool != "bearer" or f.severity != "critical" \
                 or not fnmatch.fnmatchcase(f.rule_id, "*_code_injection"):
@@ -1123,6 +1203,13 @@ _GUARDDOG_RISK_SEVERITY = {
     "low": "low",
     "no_risks_detected": "info",
 }
+# high_risk = malware (never justifiable). suspicious/low = heuristic hits on otherwise unknown
+# code: blocking (high) but justifiable - a single GuardDog heuristic on a niche package is no
+# proof, and a dead end without justification only pushes people to obfuscate.
+_GUARDDOG_RISK_CATEGORY = {"high_risk": "malware", "suspicious": "suspicious-package",
+                           "low": "suspicious-package", "no_risks_detected": "suspicious-package"}
+_GUARDDOG_RISK_LABEL_DE = {"high_risk": "hohes Schadcode-Risiko", "suspicious": "verdächtige Code-Muster",
+                           "low": "geringes Risiko"}
 
 
 def _guarddog_risk_text(risk: Any) -> str:
@@ -1164,11 +1251,11 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
         label = risk.get("label", "no_risks_detected")
         if label not in _GUARDDOG_RISK_SEVERITY:
             # Unbekanntes Label (z.B. neue guarddog-Version) fail-closed als
-            # 'high' behandeln statt still auf 'low' zu mappen — lieber ein
+            # 'high' + malware behandeln statt still auf 'low' zu mappen — lieber ein
             # falscher Positiv-Fund als ein übersehener echter.
-            severity = "high"
+            severity, category = "high", "malware"
         else:
-            severity = _GUARDDOG_RISK_SEVERITY[label]
+            severity, category = _GUARDDOG_RISK_SEVERITY[label], _GUARDDOG_RISK_CATEGORY[label]
         risks = result.get("risks") or []
         if label == "no_risks_detected" and not risks:
             continue  # kein Finding nötig, Paket unauffällig
@@ -1180,12 +1267,12 @@ def _parse_guarddog_json(out: str, ecosystem: str) -> tuple[list[Finding], str |
             tool="guarddog",
             severity=severity,
             rule_id=rule_id,
-            title=f"{ecosystem}-Paket {dep}@{version}: Risiko-Einstufung '{label}'",
+            title=f"{ecosystem}-Paket {dep}@{version}: {_GUARDDOG_RISK_LABEL_DE.get(label, label)}",
             # result["path"] is guarddog's own temp download dir of the package (differs
             # every run, gone afterwards) - the package name is the stable location.
             file=f"{ecosystem}:{dep}",
             line=None,
-            category="malware",
+            category=category,
             description=(f"GuardDog-Score {risk.get('score', 0)}. "
                          + "; ".join(_guarddog_risk_text(r) for r in risks[:5])
                          )[:800],
@@ -1230,16 +1317,18 @@ def apply_guarddog_popularity(findings: list[Finding], policy: dict[str, Any],
                               ranks: dict[str, dict[str, int]] | None = None) -> None:
     """GuardDog's `verify` runs source-code heuristics over every dependency. On the most
     downloaded packages (pandas, SQLAlchemy, PyYAML, @prisma/client ...) they fire all the time -
-    big code bases use obfuscation-like, network and filesystem patterns legitimately - and a
-    single one stopped the whole scan at the malware gate. A package within the top
-    `trusted_top_n` of the registry's download ranking becomes a hint. Typosquats of those
-    packages are by definition not on the list and keep blocking, as does everything else."""
+    big code bases use obfuscation-like, network and filesystem patterns legitimately. Only a
+    'suspicious' result on a package within the top `trusted_top_n` of the registry's download
+    ranking becomes a hint. 'high_risk' is never downgraded, however popular the package:
+    real supply-chain attacks (compromised releases of chalk/debug, ultralytics, ua-parser-js)
+    hit exactly the popular packages. Known malicious releases come from the OSV index anyway."""
     top_n = policy.get("trusted_top_n") if policy else None
     if not top_n:
         return
     ranks = ranks if ranks is not None else {}
     for f in findings:
-        if f.tool != "guarddog" or f.category != "malware" or not f.file or ":" not in f.file:
+        label = (((f.raw or {}).get("result") or {}).get("risk_score") or {}).get("label")
+        if f.tool != "guarddog" or label != "suspicious" or not f.file or ":" not in f.file:
             continue
         ecosystem, name = f.file.split(":", 1)
         if ecosystem not in ranks:
@@ -1260,6 +1349,10 @@ def apply_guarddog_popularity(findings: list[Finding], policy: dict[str, Any],
 # manifest but succeeds on these, the failure is caused by the uploaded file; if it fails on these
 # too, it's the network/proxy/registry. Decided by behaviour, not by parsing error text - error
 # messages can echo manifest content, which the uploader controls.
+# Per ecosystem, well below the wrapper's total limit (600 s) - a project with hundreds of
+# npm dependencies must not turn the whole scan into a timeout.
+GUARDDOG_TIMEOUT_SECONDS = int(os.environ.get("UNIFIED_SCAN_GUARDDOG_TIMEOUT", "240"))
+
 _GUARDDOG_CONTROL = {"pypi": ("requirements.txt", "six==1.16.0\n"),
                      "npm": ("package.json", '{"dependencies": {"left-pad": "1.3.0"}}\n')}
 _guarddog_control_cache: dict[str, bool] = {}
@@ -1311,8 +1404,8 @@ def _unscannable_manifest(rel: str, reason: str) -> Finding:
         file=rel,
         line=None,
         category="unscannable",
-        description=f"Dependency manifest could not be checked for malicious packages - fix its "
-                    f"syntax and upload again. ({reason})"[:800],
+        description=f"Die Abhängigkeitsliste konnte nicht auf Schadpakete geprüft werden – bitte "
+                    f"Syntax korrigieren und erneut hochladen. ({reason})"[:800],
     )
 
 
@@ -1340,8 +1433,16 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
             "guarddog",
             ["guarddog", ecosystem, "verify", "--output-format", "json", "--", str(target)],
             cwd=target,
-            timeout=900,
+            timeout=GUARDDOG_TIMEOUT_SECONDS,
         )
+        # run_tool's own timeout message - the text of a normal failure ("guarddog exit N: ...")
+        # can echo manifest content, so only this exact prefix counts.
+        if not ok and (err or "").startswith("guarddog timed out after "):
+            # Many dependencies, not a broken file: report as tool error (the consumer decides),
+            # never as "manifest unscannable" - and never let it eat the whole scan budget.
+            meta.setdefault("ecosystem_errors", {})[ecosystem] = err
+            meta.setdefault("timed_out", []).append(ecosystem)
+            continue
         if ok:
             parsed, parse_error = _parse_guarddog_json(out, ecosystem)
             if not parse_error:
@@ -1356,6 +1457,8 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
         manifests = _manifests(target, ecosystem)
         if not manifests or not _guarddog_control_ok(ecosystem):
             meta.setdefault("ecosystem_errors", {})[ecosystem] = err
+            # Control manifest failed as well: registry/proxy/network - infrastructure.
+            meta.setdefault("infra_errors", []).append(ecosystem)
             continue
         named = [m for m in manifests if m in (err or "")]
         for rel in named or manifests:
@@ -1376,6 +1479,227 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Abhängigkeiten: bekannte Schadpakete (OSV MAL-*), nicht festgelegte Versionen, Abdeckung
+# ---------------------------------------------------------------------------
+# GuardDog arbeitet mit Heuristiken. Bekannte Schadpakete - auch kompromittierte Versionen
+# populärer Pakete - stehen deterministisch in der OSV-Datenbank (MAL-*-Einträge des OpenSSF
+# malicious-packages-Projekts). Der Index wird beim Image-Bau erzeugt (build_osv_index.py) und
+# bei jedem Neubau aktualisiert; zur Scan-Zeit geht nichts ins Netz.
+
+OSV_INDEX_FILE = Path(os.environ.get("UNIFIED_SCAN_OSV_INDEX") or "/opt/osv/mal_index.json")
+_REQ_LINE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)$")
+_EXACT_NPM_VERSION = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+def _osv_norm(ecosystem: str, name: str) -> str:
+    name = (name or "").strip().lower()
+    return re.sub(r"[-_.]+", "-", name) if ecosystem == "pypi" else name
+
+
+def _parse_requirements(path: Path) -> list[tuple[str, str | None]]:
+    """(name, exact version or None) per requirement. Options (-r, -e, --hash ...), URLs and
+    VCS links are skipped - they don't name a registry package with a version."""
+    out: list[tuple[str, str | None]] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-") or "://" in line or line.startswith((".", "/")):
+            continue
+        line = line.split(";", 1)[0].strip()
+        m = _REQ_LINE.match(line)
+        if not m:
+            continue
+        spec = m.group(3).replace(" ", "")
+        version = spec[2:] if spec.startswith("==") and not any(c in spec[2:] for c in "*,<>!~") else None
+        out.append((m.group(1), version))
+    return out
+
+
+def _npm_lock_versions(lock: Path) -> dict[str, str]:
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    versions: dict[str, str] = {}
+    for key, meta in (data.get("packages") or {}).items():
+        if key.startswith("node_modules/") and isinstance(meta, dict) and meta.get("version"):
+            versions.setdefault(key.rsplit("node_modules/", 1)[-1], str(meta["version"]))
+    for name, meta in (data.get("dependencies") or {}).items():
+        if isinstance(meta, dict) and meta.get("version"):
+            versions.setdefault(name, str(meta["version"]))
+    return versions
+
+
+def _parse_package_json(path: Path) -> list[tuple[str, str | None]]:
+    """Direct dependencies with the exact version: from package-lock.json next to it if present,
+    otherwise only when package.json pins an exact version (no ^, ~, ranges, tags)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    lock = _npm_lock_versions(path.parent / "package-lock.json")
+    out: list[tuple[str, str | None]] = []
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        deps = data.get(section)
+        if not isinstance(deps, dict):
+            continue
+        for name, spec in deps.items():
+            spec = str(spec).strip()
+            version = lock.get(name) or (spec.lstrip("v") if _EXACT_NPM_VERSION.match(spec) else None)
+            out.append((str(name), version))
+    return out
+
+
+def collect_dependencies(target: Path) -> dict[str, list[tuple[str, str | None, str]]]:
+    """{ecosystem: [(name, version or None, manifest rel path)]} for requirements*.txt and
+    package.json (node_modules is ignored)."""
+    deps: dict[str, list[tuple[str, str | None, str]]] = {"pypi": [], "npm": []}
+    for rel in _manifests(target, "pypi"):
+        deps["pypi"] += [(n, v, rel) for n, v in _parse_requirements(target / rel)]
+    for rel in _manifests(target, "npm"):
+        deps["npm"] += [(n, v, rel) for n, v in _parse_package_json(target / rel)]
+    return deps
+
+
+def _version_key(v: str) -> tuple:
+    return tuple(int(p) if p.isdigit() else p for p in re.split(r"[.+-]", v))
+
+
+def _osv_affects(entry: dict, version: str | None) -> str | None:
+    """'yes' = this exact version (or every version) is malicious, 'maybe' = some versions are
+    and the upload doesn't pin one, None = not affected."""
+    if entry.get("all_versions"):
+        return "yes"
+    if version is None:
+        return "maybe" if (entry.get("versions") or entry.get("introduced")) else None
+    if version in (entry.get("versions") or []):
+        return "yes"
+    for start in entry.get("introduced") or []:
+        try:
+            if _version_key(version) >= _version_key(start):
+                return "yes"
+        except TypeError:
+            return "yes"  # uncomparable version scheme: fail closed
+    return None
+
+
+def load_osv_index(path: Path | None = None) -> dict[str, Any]:
+    data = json.loads((path or OSV_INDEX_FILE).read_text(encoding="utf-8"))
+    if not isinstance(data.get("ecosystems"), dict):
+        raise ValueError("OSV index has no 'ecosystems'")
+    return data
+
+
+def scan_osv_malicious(target: Path, deps: dict[str, list[tuple[str, str | None, str]]],
+                       index: dict[str, Any] | None = None) -> tuple[list[Finding], dict[str, Any]]:
+    findings: list[Finding] = []
+    meta: dict[str, Any] = {"tool": "osv", "ran": False, "error": None}
+    try:
+        index = index if index is not None else load_osv_index()
+    except (OSError, ValueError) as e:
+        meta["error"] = f"OSV malicious-package index not available: {e}"
+        return findings, meta
+    meta["ran"] = True
+    meta["index_generated"] = index.get("generated")
+    seen: set[tuple[str, str, str | None]] = set()
+    for ecosystem, items in deps.items():
+        table = index["ecosystems"].get(ecosystem) or {}
+        for name, version, manifest in items:
+            key = (ecosystem, _osv_norm(ecosystem, name), version)
+            if key in seen:
+                continue
+            seen.add(key)
+            hits = {"yes": [], "maybe": []}
+            for entry in table.get(key[1]) or []:
+                verdict = _osv_affects(entry, version)
+                if verdict:
+                    hits[verdict].append(entry["id"])
+            if hits["yes"]:
+                findings.append(Finding(
+                    tool="osv", severity="critical", rule_id="osv.malicious-package",
+                    title=f"Bekanntes Schadpaket: {name}" + (f" {version}" if version else ""),
+                    file=f"{ecosystem}:{name}", line=None, category="malware",
+                    description=(f"In {manifest}. Laut OSV-Datenbank bösartig: "
+                                 + ", ".join(sorted(hits["yes"])[:5]))[:800],
+                ))
+            elif hits["maybe"]:
+                findings.append(Finding(
+                    tool="osv", severity="high", rule_id="osv.malicious-versions",
+                    title=f"Paket mit bekannten Schad-Versionen: {name}",
+                    file=f"{ecosystem}:{name}", line=None, category="suspicious-package",
+                    description=(f"In {manifest}. Einzelne Versionen sind laut OSV-Datenbank bösartig, "
+                                 "die Version ist nicht festgelegt – bitte eine unbedenkliche Version "
+                                 "fest angeben. (" + ", ".join(sorted(hits["maybe"])[:5]) + ")")[:800],
+                ))
+    meta["finding_count"] = len(findings)
+    meta["packages_checked"] = len(seen)
+    return findings, meta
+
+
+def unpinned_dependency_hints(deps: dict[str, list[tuple[str, str | None, str]]]) -> list[Finding]:
+    """One hint per manifest: without an exact version GuardDog/OSV/trivy check the current
+    release, not necessarily the one that gets installed later."""
+    per_manifest: dict[tuple[str, str], list[str]] = {}
+    for ecosystem, items in deps.items():
+        for name, version, manifest in items:
+            if version is None:
+                per_manifest.setdefault((ecosystem, manifest), []).append(name)
+    findings = []
+    for (ecosystem, manifest), names in sorted(per_manifest.items()):
+        shown = ", ".join(sorted(set(names))[:15]) + (" …" if len(set(names)) > 15 else "")
+        findings.append(Finding(
+            tool="unified-scan", severity="low", rule_id="dependency-unpinned",
+            title="Version nicht festgelegt – geprüft wurde die aktuelle Version",
+            file=manifest, line=None, category="dependency",
+            description=f"Ohne feste Version (z.B. paket==1.2.3 bzw. package-lock.json): {shown}"[:800],
+        ))
+    return findings
+
+
+# Code files no tool checks for security issues (bearer: Python/JS/TS/Ruby/Go/PHP/Java,
+# olevba: VBA/VBScript/Office). Reported so the UI can say which files stayed unchecked -
+# derived from the archive content, not from what the uploader claims the technology is.
+UNSCANNED_CODE_EXTENSIONS = {
+    ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".ksh", ".sql", ".cs",
+    ".vb", ".r", ".pl", ".pm", ".lua", ".kt", ".kts", ".scala", ".swift", ".c", ".cc", ".cpp",
+    ".h", ".hpp", ".rs", ".ahk", ".au3", ".applescript", ".scpt", ".groovy", ".dart", ".m",
+    ".jl", ".sas", ".do", ".awk", ".tcl", ".fs", ".fsx", ".ex", ".exs", ".erl", ".hs", ".clj",
+}
+DEPENDENCY_MANIFEST_NAMES = re.compile(
+    r"^(requirements.*\.txt|package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
+    r"pipfile(\.lock)?|poetry\.lock|pyproject\.toml|setup\.py|setup\.cfg|go\.mod|go\.sum|"
+    r"gemfile(\.lock)?|composer\.(json|lock)|pom\.xml|build\.gradle(\.kts)?|packages\.config|"
+    r".+\.csproj|renv\.lock|description|cargo\.(toml|lock)|environment\.ya?ml)$",
+    re.IGNORECASE,
+)
+UNSCANNED_LIST_CAP = 100
+
+
+def coverage_report(target: Path) -> dict[str, Any]:
+    unscanned: list[str] = []
+    manifests: list[str] = []
+    for path in _iter_files(target):
+        rel = path.relative_to(target)
+        if "node_modules" in rel.parts:
+            continue
+        if path.suffix.lower() in UNSCANNED_CODE_EXTENSIONS:
+            unscanned.append(str(rel))
+        if DEPENDENCY_MANIFEST_NAMES.match(path.name):
+            manifests.append(str(rel))
+    unscanned.sort()
+    return {
+        "unscanned_files": unscanned[:UNSCANNED_LIST_CAP],
+        "unscanned_file_count": len(unscanned),
+        "dependency_manifests": sorted(manifests)[:UNSCANNED_LIST_CAP],
+    }
+
+
+# ---------------------------------------------------------------------------
 # olevba (Office-VBA-Makro-Scan: .doc/.xls/.ppt-Familie mit Makros)
 # ---------------------------------------------------------------------------
 # Bearer/trufflehog/trivy/checkov/guarddog decken alle KEINE Office-Makros ab
@@ -1385,50 +1709,62 @@ def scan_guarddog(target: Path) -> tuple[list[Finding], dict[str, Any]]:
 # OLE/OOXML-Struktur + VBA-P-Code-Dekompilierung).
 
 _OFFICE_MACRO_EXTENSIONS = {
+    # VBA/VBScript source files (exported modules, .vbs) - olevba analyses plain VBA text too.
+    ".bas", ".cls", ".frm", ".vba", ".vbs", ".vbe",
     ".doc", ".dot", ".docm", ".dotm",
     ".xls", ".xlt", ".xlsm", ".xltm", ".xlsb", ".xlam",
     ".ppt", ".pot", ".pps", ".pptm", ".potm", ".ppsm", ".ppam",
 }
 
-# Suspicious-Keywords, die olevba meldet, aber die für sich genommen sehr
-# häufig FALSE POSITIVES in legitimen Business-Makros sind (Dateizugriff,
-# Registry-Lesen etc.) vs. Keywords die praktisch nur in bösartigen Makros
-# vorkommen (Shell-Ausführung, Remote-Download, Prozess-Injection,
-# PowerShell-Aufruf). Grobes, aber begründetes Mapping statt "alles gleich
-# hoch" (das würde den Report für jedes Makro mit z.B. nur Open/Write auf
-# 'kritisch' hochziehen und den Report für Nutzer wertlos machen).
-_OLEVBA_CRITICAL_KEYWORDS = {
-    "shell", "wscript.shell", "shellexecute", "shellexecutea", "shell.application",
-    "powershell", "start-process", "invoke-expression",
-    "urldownloadtofilea", "net.webclient", "downloadfile", "downloadstring",
-    "msxml2.xmlhttp", "microsoft.xmlhttp", "msxml2.serverxmlhttp",
-    "createthread", "createuserthread", "virtualalloc", "virtualallocex",
-    "writeprocessmemory", "rtlmovememory", "setcontextthread", "queueapcthread",
+# Office-Makros sind der Kernfall interner Tools (Excel-VBA). Shell-Aufrufe, CreateObject,
+# XMLHTTP-Abfragen oder PowerShell stecken in sehr vielen legitimen Makros (REST-Abfrage, Explorer
+# öffnen, Batch starten) - für sich genommen daher "high" (blockiert, aber begründbar).
+# "critical" (nie begründbar) nur für Muster, die praktisch nur Schad-Makros haben:
+# Speicher-/Prozess-Injection-APIs, bekannte Dridex-Verschleierung und die Kombination
+# "startet automatisch + lädt etwas herunter + führt etwas aus" im selben Makro-Projekt.
+_OLEVBA_INJECTION_KEYWORDS = {
+    "createthread", "createuserthread", "createremotethread", "virtualalloc", "virtualallocex",
+    "virtualprotect", "writeprocessmemory", "rtlmovememory", "setcontextthread", "queueapcthread",
+    "ntcreatethreadex", "ntallocatevirtualmemory", "ntwritevirtualmemory", "enumsystemlanguagegroupsw",
 }
-_OLEVBA_HIGH_KEYWORDS = {
-    "createobject", "getobject", "new-object",
-    "chr", "chrb", "chrw", "strreverse", "xor", "callbyname",
+_OLEVBA_EXECUTE_KEYWORDS = {
+    "shell", "wscript.shell", "shellexecute", "shellexecutea", "shellexecutew", "shell.application",
+    "powershell", "start-process", "invoke-expression", "iex", "createprocessa",
+    "createprocessw", "winexec", "macscript",
 }
+_OLEVBA_DOWNLOAD_KEYWORDS = {
+    "urldownloadtofilea", "urldownloadtofilew", "urldownloadtofile", "net.webclient", "downloadfile",
+    "downloadstring", "msxml2.xmlhttp", "microsoft.xmlhttp", "msxml2.serverxmlhttp",
+    "winhttp.winhttprequest", "internetopena", "internetreadfile", "xmlhttp",
+}
+# For the dropper combination only: calls that fetch something AND put it on disk (or pull code).
+# A plain XMLHTTP request reading a REST API on open is everyday business-macro code.
+_OLEVBA_DROPPER_DOWNLOAD_KEYWORDS = {
+    "urldownloadtofilea", "urldownloadtofilew", "urldownloadtofile", "net.webclient", "downloadfile",
+    "downloadstring", "savetofile", "adodb.stream", "internetreadfile",
+}
+_OLEVBA_HIGH_KEYWORDS = (_OLEVBA_EXECUTE_KEYWORDS | _OLEVBA_DOWNLOAD_KEYWORDS | {
+    "createobject", "getobject", "new-object", "callbyname", "chr", "chrb", "chrw", "strreverse",
+    "xor", "environ", "kill", "savetofile", "adodb.stream", "scripting.filesystemobject",
+})
+_OLEVBA_CLICK_HANDLER = re.compile(r"_(Dbl)?Click$", re.IGNORECASE)
 
 
 def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
     """None bedeutet: kein eigenes Finding (z.B. IOC — zu rauschanfällig,
     siehe unten)."""
     if keyword_type == "AutoExec":
-        # olevba zählt auch Button-Handler (CommandButton1_Click) zu AutoExec – die laufen
-        # erst, wenn jemand klickt, und stecken in fast jedem Business-Makro mit Knöpfen.
-        # Andere Steuerelement-Ereignisse (_Layout, _Painted, _GotFocus …) bleiben high: die
-        # feuern teils von selbst und werden von Schad-Makros genau dafür benutzt.
-        if re.search(r"_(Dbl)?Click$", keyword or "", re.IGNORECASE):
+        # olevba zählt auch Button-Handler (CommandButton1_Click) zu AutoExec – die laufen erst,
+        # wenn jemand klickt, und stecken in fast jedem Business-Makro mit Knöpfen. Andere Ereignisse (_Layout, _Painted,
+        # _GotFocus …) bleiben high: die feuern teils von selbst.
+        if _OLEVBA_CLICK_HANDLER.search(keyword or ""):
             return "low"
-        return "high"  # Makro läuft automatisch beim Öffnen — an sich schon
-        # ein Warnsignal in einem "Dashboard mit echten Daten", das i.d.R.
-        # gar keine Makros braucht.
+        return "high"
     if keyword_type == "Suspicious":
         kw = (keyword or "").strip().lower()
         if kw in ("hex strings", "base64 strings"):
             return "low"  # olevba's summary line for encoded strings - same as "Hex String"
-        if kw in _OLEVBA_CRITICAL_KEYWORDS:
+        if kw in _OLEVBA_INJECTION_KEYWORDS:
             return "critical"
         if kw in _OLEVBA_HIGH_KEYWORDS:
             return "high"
@@ -1436,11 +1772,48 @@ def _olevba_finding_severity(keyword_type: str, keyword: str) -> str | None:
     if keyword_type in ("Hex String", "Base64 String"):
         return "low"  # nur Hinweis auf Obfuskierung, kein direkter Beweis
     if keyword_type == "Dridex String":
-        return "critical"  # Dridex ist eine reale Banking-Malware-Familie mit
-        # spezifischen Obfuskierungsmustern, die olevba direkt erkennt — anders
-        # als generisches Hex/Base64 ist das kein Rauschen, sondern ein
-        # konkreter Malware-Signaturtreffer.
+        return "critical"  # konkreter Signaturtreffer einer realen Malware-Familie
     return None  # IOC, VBA String etc. — nicht als Einzelfinding, siehe meta
+
+
+_OFFICE_KIND = (
+    ((".doc", ".dot", ".docm", ".dotm", ".docx", ".rtf"), "Word-Dokument"),
+    ((".xls", ".xlt", ".xlsm", ".xltm", ".xlsb", ".xlam", ".xlsx"), "Excel-Datei"),
+    ((".ppt", ".pot", ".pps", ".pptm", ".potm", ".ppsm", ".ppam", ".pptx"), "PowerPoint-Datei"),
+    ((".bas", ".cls", ".frm", ".vba"), "VBA-Quelltext"),
+    ((".vbs", ".vbe"), "VBScript"),
+)
+
+
+def _office_kind(rel_path: str) -> str:
+    lower = rel_path.lower()
+    for suffixes, label in _OFFICE_KIND:
+        if lower.endswith(suffixes):
+            return label
+    return "Office-Datei"
+
+
+def _olevba_title(keyword_type: str, keyword: str, kind: str) -> str:
+    if keyword_type == "AutoExec":
+        if _OLEVBA_CLICK_HANDLER.search(keyword or ""):
+            return f"Makro-Schaltfläche/Ereignis: {keyword}"
+        return f"Makro startet automatisch ({kind}): {keyword}"
+    if keyword_type == "Suspicious":
+        kw = (keyword or "").strip().lower()
+        if kw in ("hex strings", "base64 strings"):
+            return "Verschlüsselte Zeichenketten im Makro"
+        if kw in _OLEVBA_INJECTION_KEYWORDS:
+            return f"Speicher-/Prozess-Manipulation im Makro: {keyword}"
+        if kw in _OLEVBA_DOWNLOAD_KEYWORDS:
+            return f"Makro lädt Daten aus dem Netz: {keyword}"
+        if kw in _OLEVBA_EXECUTE_KEYWORDS:
+            return f"Makro startet Programme: {keyword}"
+        return f"Auffälliger Befehl im Makro: {keyword}"
+    if keyword_type in ("Hex String", "Base64 String"):
+        return "Verschlüsselte Zeichenkette im Makro"
+    if keyword_type == "Dridex String":
+        return "Bekannte Schad-Makro-Verschleierung (Dridex)"
+    return f"Auffälligkeit im Makro: {keyword}"
 
 
 def _find_office_macro_files(target: Path) -> list[Path]:
@@ -1495,6 +1868,7 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
             cwd=target, timeout=180,
         )
         meta["files_scanned"] += 1
+        signals = {"autoexec": False, "download": False, "execute": False}
         if not ok:
             meta.setdefault("file_errors", {})[rel_path] = err
             continue
@@ -1542,17 +1916,40 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
                 severity = _olevba_finding_severity(keyword_type, keyword)
                 if severity is None:
                     continue
+                kw_lower = (keyword or "").strip().lower()
+                if keyword_type == "AutoExec" and not _OLEVBA_CLICK_HANDLER.search(keyword or ""):
+                    signals["autoexec"] = True
+                if keyword_type == "Suspicious" and kw_lower in _OLEVBA_DROPPER_DOWNLOAD_KEYWORDS:
+                    signals["download"] = True
+                if keyword_type == "Suspicious" and kw_lower in _OLEVBA_EXECUTE_KEYWORDS:
+                    signals["execute"] = True
                 findings.append(Finding(
                     tool="olevba",
                     severity=severity,
                     rule_id=f"olevba.{keyword_type.lower().replace(' ', '_')}.{keyword}"[:120],
-                    title=f"VBA-Makro in {rel_path}: {item.get('description', keyword_type)}",
+                    title=_olevba_title(keyword_type, keyword, _office_kind(rel_path)),
                     file=rel_path,
                     line=None,
-                    category="malware",
-                    description=f"Keyword: {keyword!r} | {item.get('description', '')}"[:800],
+                    category="malware" if severity == "critical" else "macro",
+                    description=f"Gefunden in {rel_path}: {keyword}"[:800],
                     raw=item,
                 ))
+
+        if all(signals.values()):
+            # Starts by itself, fetches something from the network and runs a program: the
+            # classic dropper chain. Each part alone is common in business macros - together
+            # they are not, and that never gets justified away.
+            findings.append(Finding(
+                tool="olevba",
+                severity="critical",
+                rule_id="olevba.combo.autoexec_download_execute",
+                title="Makro startet automatisch, lädt etwas herunter und führt es aus",
+                file=rel_path,
+                line=None,
+                category="malware",
+                description=(f"Gefunden in {rel_path}: automatischer Start, Download und "
+                             "Programmstart im selben Makro-Projekt."),
+            ))
 
     # An Office file olevba cannot analyse (crash, encrypted, timeout) hides its macros - that
     # blocks as "unscannable" instead of passing as a partly checked upload.
@@ -1565,8 +1962,8 @@ def scan_olevba(target: Path) -> tuple[list[Finding], dict[str, Any]]:
             file=rel_path,
             line=None,
             category="unscannable",
-            description=f"Office file could not be analysed for macros - save it again as a normal "
-                        f"unencrypted file and upload again. ({str(reason)[:300]})"[:800],
+            description=f"Die Datei konnte nicht auf Makros geprüft werden – bitte normal und "
+                        f"unverschlüsselt neu speichern und erneut hochladen. ({str(reason)[:300]})"[:800],
         ))
 
     meta["finding_count"] = len(findings)
@@ -1616,8 +2013,10 @@ def compute_criticality(findings: list[Finding]) -> dict[str, Any]:
     raw_score = blocking_score + low_score
     score = min(100, raw_score)
 
-    if by_sev["critical"] > 0 or score >= 80:
+    if by_sev["critical"] > 0:
         verdict = "RED — nicht live nehmen, kritische Findings zuerst fixen"
+    elif score >= 80:
+        verdict = "RED — viele blockierende Findings, vor Live-Gang fixen oder begründen"
     elif by_sev["high"] > 0 or score >= 40:
         verdict = "GELB — vor Live-Gang fixen, dokumentierte Ausnahme sonst nötig"
     elif score >= 10:
@@ -1652,9 +2051,9 @@ def render_employee_markdown(findings: list[Finding], target: str, source_kind: 
         f"_Generiert: {datetime.now(timezone.utc).isoformat()}_",
         "",
         "Alle Punkte hier müssen geprüft/gefixt werden bevor das Projekt live geht.",
-        "Sortiert nach Schweregrad. Mit 🧪 markierte Punkte liegen in Test-/Beispiel-/",
-        "Vendor-Code und fließen NICHT in den internen Kritikalitäts-Score ein — trotzdem",
-        "einen Blick wert, aber nicht blockierend.",
+        "Sortiert nach Schweregrad. Mit 🧪 markierte Punkte liegen in echtem Testcode",
+        "(Testpfad und Test-Framework) und fließen NICHT in den internen Kritikalitäts-Score",
+        "ein — trotzdem einen Blick wert, aber nicht blockierend.",
         "",
     ]
     grouped: dict[str, list[Finding]] = {s: [] for s in SEVERITY_ORDER}
@@ -1697,7 +2096,7 @@ def render_criticality_markdown(crit: dict[str, Any], target: str, source_kind: 
         f"## Einschätzung: {crit['verdict']}",
         "",
         "### Aufschlüsselung nach Schweregrad",
-        "(ohne Test-/Beispiel-/Vendor-Code — siehe Hinweis unten)",
+        "(ohne echten Testcode — siehe Hinweis unten)",
         "",
     ]
     for sev in SEVERITY_ORDER:
@@ -1776,7 +2175,14 @@ def main() -> int:
         print(f"      -> {m.get('finding_count', 0)} findings"
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
-        malware_findings = nested_findings + malware_findings
+        deps = collect_dependencies(target)
+        print("[0b/7] OSV (bekannte Schadpakete, offline)...")
+        osv_findings, m = scan_osv_malicious(target, deps)
+        tool_meta["osv"] = m
+        print(f"      -> {m.get('finding_count', 0)} findings"
+              + (f" (ERROR: {m['error']})" if m.get("error") else ""))
+
+        malware_findings = nested_findings + malware_findings + osv_findings
         malware_critical = [f for f in malware_findings
                             if f.severity == "critical" and f.category == "malware"]
         gate_passed = not malware_critical
@@ -1839,9 +2245,13 @@ def main() -> int:
                  if m.get("ran") else "")
               + (f" (ERROR: {m['error']})" if m.get("error") else ""))
 
+        all_findings += unpinned_dependency_hints(deps)
+
         _relativize_findings(all_findings, target)
+        refine_test_exemption(all_findings, target)
         all_findings = drop_duplicate_findings(drop_secret_duplicates(all_findings))
         criticality = compute_criticality(all_findings)
+        coverage = coverage_report(target)
 
         combined = {
             "target": args.target,
@@ -1852,6 +2262,7 @@ def main() -> int:
             "tools": tool_meta,
             "employee_findings": [f.to_dict() for f in all_findings],
             "internal_criticality": criticality,
+            **coverage,
         }
 
         (out_dir / "combined_report.json").write_text(json.dumps(combined, indent=2))

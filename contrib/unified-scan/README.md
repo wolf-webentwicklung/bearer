@@ -18,38 +18,36 @@ Genau das sind die häufigsten Lecks bei schnell mit AI-Tools gebauten Apps
 (ChatGPT/Claude-Dashboards, R/Shiny-Dashboards etc.), die live mit echten
 Daten laufen.
 
-## Pipeline-Reihenfolge: erst Malware-Gate, dann Security-Scan
+## Pipeline
 
 ```
-Stufe 0: Malware-Gate
-  └─ guarddog   -> sind installierte PyPI/npm-Pakete selbst bösartig?
-                   (Typosquatting, verdächtige Install-Scripts,
-                    Obfuskierung, Daten-Exfiltration-Muster)
+Malware-Gate
+  ├─ guarddog  -> Heuristiken auf PyPI/npm-Abhängigkeiten (Install-Scripts,
+  │               Obfuskierung, Exfiltration). high_risk = critical/malware,
+  │               suspicious = high/suspicious-package (begründbar)
+  ├─ osv       -> bekannte Schadpakete (OSV MAL-*, Offline-Index aus dem
+  │               Image-Bau) = critical/malware
+  └─ verschachtelte Archive = critical/unscannable
 
-  Findet sich hier ein "high_risk"-Paket: Gate fehlgeschlagen
-  (gate_passed: false, Exit-Code 1, Ergebnis gesperrt). Stufe 1 läuft
-  trotzdem, damit alle Probleme auf einmal sichtbar sind – kein Tool
-  führt Code aus dem Upload aus.
+  Ein critical-Fund mit Kategorie malware: gate_passed: false, Exit-Code 1,
+  Ergebnis gesperrt. Die übrigen Prüfungen laufen trotzdem, damit alle
+  Probleme auf einmal sichtbar sind – kein Tool führt Code aus dem Upload aus.
 
-Stufe 1: Security-Scan (läuft immer)
-  ├─ bearer      -> SAST + Privacy/Datenfluss
-  ├─ trufflehog  -> Secrets im Code + Git-History
+Code- und Konfigurations-Prüfung (läuft immer)
+  ├─ bearer      -> SAST + Privacy/Datenfluss (Schweregrade per Policy)
+  ├─ trufflehog  -> Secrets im aktuellen Dateistand, zusätzlich Git-History
   ├─ trivy       -> Dependency-CVEs (SCA) + Docker-Base-Image-CVEs
   ├─ checkov     -> IaC-Fehlkonfigurationen
-  └─ olevba      -> Office-VBA-Makros (.doc*/.xls*/.ppt*): AutoExec,
-                     Shell/PowerShell-Aufrufe, Obfuskierung
+  └─ olevba      -> Office-VBA-Makros (.doc*/.xls*/.ppt*) und VBA/VBScript-
+                     Quelltexte (.bas/.cls/.frm/.vba/.vbs)
 ```
-
-Begründung für die Reihenfolge: Wenn eine Dependency selbst bösartig ist,
-ist jede tiefere Analyse des eigenen Codes zweitrangig — erst die akute
-Bedrohung (Malware im Projekt) klären, danach regulär auf
-Sicherheitslücken im eigenen Code prüfen.
 
 ## Was läuft
 
 | Tool | Zweck | Läuft lokal? |
 |---|---|---|
-| [guarddog](https://github.com/DataDog/guarddog) | Malware-Gate: bösartige PyPI/npm-Pakete | größtenteils (lädt Paket-Inhalte + Metadaten von der Registry, siehe unten) |
+| [guarddog](https://github.com/DataDog/guarddog) | Malware-Gate: Heuristiken auf PyPI/npm-Pakete | größtenteils (lädt Paket-Inhalte + Metadaten von der Registry, siehe unten) |
+| [OSV](https://osv.dev) malicious-packages | Malware-Gate: bekannte Schadpakete (MAL-*) | ja (Index wird beim Image-Bau erzeugt) |
 | [bearer](https://github.com/bearer/bearer) | SAST + Privacy/Datenfluss (PII/PHI) | ja |
 | [trufflehog](https://github.com/trufflesecurity/trufflehog) | Secrets im Code + Git-History | ja |
 | [trivy](https://github.com/aquasecurity/trivy) | Dependency-CVEs (SCA) + Docker-Base-Image-CVEs | ja (CVE-DB-Sync via Netz) |
@@ -62,9 +60,8 @@ Kein Tool hier braucht eine Cloud-API oder ein LLM. Der gescannte
 euren Code, sondern die Dependency selbst, z.B. `requests` von PyPI) und
 fragt Metadaten bei der Registry ab — exakt wie ein normales
 `pip install`/`npm install` das auch täte. Fehlende Tools werden
-übersprungen (nicht fatal, außer guarddog fehlt — dann läuft das
-Malware-Gate leer durch), Fehler landen im Report unter
-`tools.<name>.error`.
+übersprungen, Fehler landen im Report unter `tools.<name>.error` und im
+HTTP-Wrapper unter `failed_tools` bzw. `core_failed_tools`.
 
 
 ## Ziel: lokaler Ordner, Git oder nicht, eine Git-URL oder ein Archiv
@@ -155,11 +152,30 @@ Zusätzlich zum normalen Report liefert der Wrapper:
 - `incomplete` / `failed_tools`: `true` bzw. die Liste der Tools, die für
   dieses Archiv nicht oder nur teilweise gelaufen sind. Das sind `error`,
   `image_errors` oder `ecosystem_errors` unter `tools.<name>`.
+- `core_failed_tools`: die Teilmenge davon unter den Kern-Tools `bearer`,
+  `trufflehog`, `guarddog`, `osv`, deren Ausfall **nicht** an Registry/Netz
+  liegt (GuardDog: Kontrolllauf klappt; Netzprobleme stehen in
+  `tools.guarddog.infra_errors` und fehlen hier). Empfehlung an den
+  Verbraucher: ist der Scanner gesund und diese Liste nicht leer, sperren –
+  ohne Kern-Tool sagt das Ergebnis nichts über Code bzw. Pakete aus.
+- `unscanned_files` / `unscanned_file_count`: Code-Dateien, die kein Tool auf
+  Sicherheitsprobleme prüft (`.ps1`, `.bat`, `.sh`, `.sql`, `.cs`, `.r` …),
+  abgeleitet aus dem Archiv-Inhalt (Liste auf 100 gekürzt).
+- `dependency_manifests`: gefundene Abhängigkeitslisten/Lockfiles
+  (`requirements*.txt`, `package.json`, `package-lock.json`, `poetry.lock`,
+  `pom.xml` …). Leer = keine Paketprüfung möglich.
 - NUL-Zeichen werden aus allen Texten entfernt. `line` ist entweder ein
   int zwischen 1 und 10.000.000 oder `null`.
-- GuardDog-Funde: `tool: "guarddog"`, `category: "malware"`. Schlägt das
-  Malware-Gate an (`gate_passed: false`), läuft der Security-Scan trotzdem;
-  `internal_criticality` ist vorhanden, das Ergebnis bleibt gesperrt.
+- Paket-Funde: `guarddog` mit `category: "malware"` (high_risk, critical,
+  nie begründbar) oder `"suspicious-package"` (suspicious, high,
+  begründbar); `osv` mit `rule_id` `osv.malicious-package` (critical,
+  `malware`) oder `osv.malicious-versions` (high, `suspicious-package`: nur
+  einzelne Versionen bösartig, Version nicht festgelegt). Schlägt das
+  Malware-Gate an (`gate_passed: false`), läuft der Rest trotzdem.
+- `unified-scan`/`dependency-unpinned` (low, `dependency`): Abhängigkeiten
+  ohne feste Version – geprüft wurde die aktuelle Version.
+- olevba-Funde: `category: "macro"` (high/medium/low, begründbar), echte
+  Malware-Muster `category: "malware"` (critical).
 
 Jeder Job läuft in einem eigenen Ordner unter `UNIFIED_SCAN_WORKDIR`, der
 auch als `TMPDIR` für alle Tools dient. Er wird vor der Antwort gelöscht.
@@ -213,14 +229,24 @@ Telefon-nach-Hause eingestellt ist:**
 - Telemetrie aus: `TRIVY_DISABLE_TELEMETRY`, `DO_NOT_TRACK`,
   `BC_SKIP_MAPPING` (checkov).
 
-**Regelmäßig neu bauen (z.B. wöchentlich):** trivy-Datenbank und
-Bearer-Regeln stecken im Image und veralten sonst.
+**Regelmäßig neu bauen – `rebuild.sh` (z.B. wöchentlich per cron/systemd-Timer):**
+Ein Neubau aktualisiert die trivy-Datenbank, den OSV-Index bekannter
+Schadpakete und die Debian-Pakete des Basis-Images (`--pull`). Die Tool-
+Versionen und die **Bearer-Regeln bleiben gepinnt** – neue Regeln nur mit
+`BEARER_RULES_VERSION=latest rebuild.sh …` (oder einer festen Version),
+weil ein Regel-Update Regeln umbenennen kann. Vor dem Umschalten läuft ein
+Selbsttest im neuen Image: echtes bearer gegen `tests/fixtures/idv_corpus/`
+(`test_corpus_real_bearer.py`) und jeder Policy-Glob muss eine Regel treffen
+(`test_policy_globs.py`). Nur wenn beides grün ist, wird das Image zu
+`<name>:current`; das alte bleibt als `<name>:previous` für den Rückweg.
+Danach den Scanner-Dienst neu starten.
 
 Größen: checkov und guarddog (semgrep) brauchen jeweils mehrere hundert MB
 RAM. Ein tmpfs zählt zum Speicherlimit des Containers. Deshalb eher 3 GB
 RAM und 1 GB tmpfs, nicht weniger.
 
-**Netzwerk:** Zwei Schritte brauchen zur Laufzeit Internet:
+**Netzwerk:** Zwei Schritte brauchen zur Laufzeit Internet (der OSV-Index
+und die trivy-DB liegen im Image):
 1. `guarddog` lädt die zu prüfenden Pakete von PyPI/npm.
 2. `trivy image` holt die Base-Images aus Dockerfiles.
 
@@ -251,6 +277,13 @@ Möglichkeiten:
   `packages.ecosyste.ms` (GuardDogs Abgleich mit Quell-Repo/Metadaten —
   schwächt nur diese eine Heuristik, `github.com` wäre aber ein möglicher
   Abflusskanal).
+
+  **Restrisiko, ehrlich:** Auch über die freigegebenen Hosts ließen sich
+  Daten hinausschaffen – z.B. `npm publish` an registry.npmjs.org oder ein
+  Push nach Docker Hub/ghcr.io/quay.io mit eigenem Account. Das setzt
+  Codeausführung im Scanner voraus (kein Tool führt Upload-Code aus;
+  read-only, `noexec`-tmpfs, keine Capabilities, kein root). Ein Proxy mit
+  SNI-Prüfung verhindert Domain-Fronting, nicht diese Wege.
 
 ## Sprachgrenze von Bearer
 
@@ -333,45 +366,51 @@ internen Tools (CLI-Skripte, Excel/CSV-Verarbeitung, Datei-Tools) schlagen dadur
 auf völlig normalen Code an, z.B. `open(pfad)` mit einem Funktionsparameter als „high –
 path traversal“. `severity_policy.json` stuft Bearer-Funde für diesen Einsatz um:
 
-- **bleibt kritisch:** `eval`/`exec` mit Eingaben, Code-/Template-Injection, Deserialisierung
-  fremder Daten
-- **high (blockiert, aber pro Fund begründbar):** OS-Befehle (`*_os_command_injection` –
-  schlägt auch bei festen Befehlslisten ohne Shell an), Pickle, abgeschaltete
+Gleiche Regelklasse = gleiche Stufe in allen Sprachen:
+
+- **bleibt kritisch:** `eval`/`exec` mit Eingaben, Code-Injection, Deserialisierung fremder
+  Daten
+- **high (blockiert, begründbar):** OS-Befehle/Prozessaufrufe (`*_os_command_injection`,
+  `*_dynamic_os_command`, `*_exec_using_user_input`, `*_subproc_*` – schlagen auch bei festen
+  Befehlslisten an), unverschlüsselte Verbindungen (`*_insecure_http`, `*_http_insecure`,
+  `*_insecure_ftp`, Websockets – im internen Netz verbreitet), Pickle, abgeschaltete
   TLS-Prüfung (mindestens high), hartcodierte Secrets (mindestens high)
-- **medium (blockiert, begründbar):** SQL-/NoSQL-Injection, XSS/Open Redirect/SSRF (nur bei
-  Tools mit Weboberfläche relevant), schwache Passwort-Hashes (mindestens medium)
+- **medium (blockiert, begründbar):** jede SQL-/NoSQL-Injection (`*_sql_injection`, `*_sqli`),
+  jede XSS-/HTML-Injection (`*_cross_site_scripting`, `*_dangerous_insert_html`,
+  `*_template_injection` – bei Bearer XSS-Regeln …), Open Redirect/SSRF, Dateipfad aus einer
+  Web-Anfrage (`*_path_using_user_input`), unverschlüsseltes SMTP (`starttls()` per
+  Konfiguration sieht Bearer nicht), schwache Passwort-Hashes (mindestens medium)
 - **low (nur Hinweis):** Dateipfade aus Aufruf/Konfiguration (`*_path_traversal`,
-  `*_non_literal_fs_filename`), Log-Ausgaben, Cookie-/CORS-/Header-Härtung
-- **medium statt kritisch:** unverschlüsseltes SMTP (`*_insecure_smtp`) – TLS wird in
-  Skripten oft per Konfiguration zugeschaltet (`starttls()`), das sieht Bearer nicht
-- **Zeilenprüfung für `*_code_injection`:** liegt der kritische Fund auf einer Zeile, die nur
-  `setattr`/`getattr`/`delattr` aufruft (und kein `eval`/`exec`/`compile`), wird er high
-  (begründbar) – ein dynamischer Attributname setzt ein Feld, er führt keinen Code aus. Das
-  steckt in `refine_code_injection()`, nicht in der JSON-Datei, weil es die Quellzeile liest
+  `*_non_literal_fs_filename`), einfacher Zufall (`*_weak_random`,
+  `*_insufficiently_random_values`), Log-Ausgaben, Exceptions, Cookie-/CORS-/Header-Härtung
+- **Zeilenprüfung für `*_code_injection`:** liegt der kritische Fund auf einer Zeile mit
+  `setattr`/`getattr`/`delattr` und keinem Code-Ausführungs-Muster (`eval`, `exec`, `compile`,
+  `__import__`, `importlib.import_module`, `os.exec*`/`os.spawn*`, `globals()[…]`, `getattr`
+  auf `builtins`/`os`/`subprocess`), wird er high (begründbar). Steckt in
+  `refine_code_injection()`, weil es die Quellzeile liest
 - **Checkov-Hygiene (nur Hinweis):** Dockerfile-/Workflow-Checks ohne Sicherheitslücke im Code
   (`CKV_DOCKER_2/3/4/5/7/9` – HEALTHCHECK, USER, ADD, apt, `latest`; `CKV2_GHA_1`, `CKV_GHA_7`).
   Regeln mit `"tool": "checkov"` gelten nur für Checkov, alle anderen nur für Bearer
-- **GuardDog auf weit verbreiteten Paketen (`guarddog`-Abschnitt):** GuardDogs Code-Heuristiken
-  schlagen bei großen, beliebten Paketen (pandas, SQLAlchemy, PyYAML, Jinja2, `@prisma/client` …)
-  ständig an und haben den ganzen Scan am Malware-Gate gestoppt. Ein Paket unter den
-  `trusted_top_n` (5000) meistgeladenen der Registry – laut GuardDogs eigener
-  `top_<ökosystem>_packages.json` – wird zum Hinweis. Typosquats dieser Pakete stehen per
-  Definition nicht auf der Liste und blockieren weiter, ebenso jedes andere Paket. Fehlt die
-  Liste, wird nichts herabgestuft
-  **Restrisiko:** Eine kompromittierte Version eines beliebten Pakets (Supply-Chain-Angriff auf
-  den Maintainer) erscheint dadurch nur als Hinweis. Bekannte bösartige Versionen meldet trivy
-  über seine Advisory-Datenbank weiterhin; `trusted_top_n` lässt sich verkleinern oder auf 0
-  setzen (dann wird nichts herabgestuft)
+- **GuardDog (`guarddog`-Abschnitt):** Nur ein `suspicious`-Ergebnis (Heuristik) auf einem
+  Paket unter den `trusted_top_n` (5000) meistgeladenen der Registry – laut GuardDogs eigener
+  `top_<ökosystem>_packages.json` – wird zum Hinweis; GuardDogs Code-Muster schlagen bei großen
+  Paketen (pandas, SQLAlchemy, `@prisma/client` …) ständig an. **`high_risk` bleibt immer
+  critical**, egal wie beliebt das Paket ist: echte Supply-Chain-Angriffe (kompromittierte
+  Releases von chalk/debug, ultralytics, ua-parser-js) trafen genau die populären Pakete.
+  `suspicious` auf anderen Paketen ist high + `suspicious-package` (begründbar), damit ein
+  einzelner Heuristik-Treffer auf einem Nischenpaket keine Sackgasse ist. Bekannte
+  Schadpakete und -Versionen meldet zusätzlich der OSV-Index deterministisch
 - **Exceptions mit Daten (`*_exception`) nur Hinweis:** betrifft Fehlermeldungen in Web-Antworten;
   schlug in mehreren Projekten auf harmlosen Zeilen an (z.B. `super().__init__`)
-- **olevba:** Button-Handler (`*_Click`, `*_DblClick`) sind nur ein Hinweis – sie laufen erst beim
-  Klick. Andere Ereignisse (`Workbook_Open`, `AutoOpen`, `_Layout`, `_Painted` …) bleiben high.
-  Die Sammelzeile „Hex Strings“/„Base64 Strings“ ist wie einzelne kodierte Strings nur ein Hinweis
+- **olevba:** siehe „Office-Makro-Scan im Detail“
 - **nicht gelistete Regeln** behalten Bearers Schweregrad
 
 Regeln werden von oben nach unten geprüft, der erste passende `match` (Glob auf die
 Bearer-Regel-ID) gewinnt; `mode: "set"` ersetzt, `mode: "min"` hebt nur an. Gilt nur für
-`tool == "bearer"`, nie für `secret`/`malware`/`malicious-package`/`unscannable`. Geänderte
+`tool == "bearer"` (bzw. `"checkov"` bei Regeln mit `"tool": "checkov"`), nie für
+`secret`/`malware`/`malicious-package`/`unscannable`. `tests/test_policy_globs.py` schlägt fehl,
+wenn ein Glob keine Regel der gepinnten bearer-rules-Version trifft (tote Regel nach einem
+Regel-Update), und prüft, dass jede Klasse in allen Sprachen dieselbe Stufe bekommt. Geänderte
 Funde tragen `original_severity` und `policy_reason` (deutsch, zum Anzeigen gedacht);
 Score und Ampel rechnen mit dem neuen Schweregrad.
 
@@ -439,11 +478,12 @@ Secret wie eine eigene Passwort-Regel, bleibt nur der trufflehog-Fund (`drop_sec
 Jede Regelgruppe zählt **einmal** mit ihrem höchsten Schweregrad, egal an wie vielen Stellen
 sie vorkommt (Gruppe = Tool + Regel-ID, bei trivy Tool + Paket). Gewichte: critical 40,
 high 20, medium 8, low 2, info 0. low und info zusammen höchstens 5 Punkte, allein also nie
-über GRÜN hinaus. Funde in Testpfaden zählen nicht.
+über GRÜN hinaus. Echter Testcode zählt nicht (siehe Test-Code-Filter). Begründete Ausnahmen
+kennt der Score nicht – er bewertet den Upload, nicht die Entscheidung darüber.
 
 | Verdict | Bedingung |
 |---|---|
-| RED | mindestens eine critical-Gruppe oder Score ≥ 80 |
+| RED | mindestens eine critical-Gruppe („kritische Findings zuerst fixen“) oder Score ≥ 80 („viele blockierende Findings“) |
 | GELB | mindestens eine high-Gruppe oder Score ≥ 40 |
 | GELB-GRÜN | Score ≥ 10 |
 | GRÜN | sonst |
@@ -453,24 +493,22 @@ die einzelnen Stellen.
 
 ## Test-Code-Filter
 
-Findings in echten Test-Pfaden (`test/`, `tests/`, `__tests__/`, `spec/`,
-`fixtures/`, `testdata/` sowie Dateien wie `test_*.py`, `*_test.py`,
-`*_test.go`, `*.test.ts`, `*.spec.js`, `*_spec.rb`) werden im
-Mitarbeiter-Report weiter angezeigt (mit 🧪 markiert), fließen aber nicht in
-`internal_criticality` ein (`excluded_from_score: true`). Die Liste steht in
-`NOISE_PATH_PATTERNS` / `_NOISE_FILE_PATTERN`.
+Ein Fund gilt nur dann als Testcode (`excluded_from_score: true`, im Report mit 🧪), wenn
+**beides** zutrifft:
 
-Bewusst **nicht** mehr ausgeschlossen: `build/`, `dist/`, `vendor/`,
-`node_modules/`, `examples/`, `demo/`, `.venv/` usw. Das ist oft genau der
-Code, der ausgeliefert wird, und ein Ordnername ist vom Uploader frei
-wählbar — er darf keine Funde abschalten.
+1. der Pfad sieht nach Test aus (`test/`, `tests/`, `__tests__/`, `spec/`, `fixtures/`,
+   `testdata/` sowie Dateien wie `test_*.py`, `*_test.py`, `*_test.go`, `*.test.ts`,
+   `*.spec.js`, `*_spec.rb`), **und**
+2. die Datei nutzt tatsächlich ein Test-Framework (Python: `import pytest`/`unittest`/`nose`;
+   JS/TS: Import von jest/vitest/mocha/…/`node:test` oder `describe(`/`it(`/`test(`;
+   Go: `"testing"`; Ruby: rspec/minitest; Java: JUnit/TestNG; PHP: PHPUnit)
+   (`refine_test_exemption()`, läuft nach allen Umstufungen).
 
-**Nie ausgeschlossen**, auch in Test-Pfaden: Schweregrad `critical` und die
-Kategorien `secret`, `malware`, `malicious-package` und `unscannable`.
-
-Hinweis: Bearer filtert Test-Pfade oft schon selbst intern raus, bevor
-Findings überhaupt bei uns ankommen — der Filter hier greift zusätzlich
-für Tools wie Checkov, die das nicht selbst tun.
+Ein Ordnername allein ist vom Uploader frei wählbar und schaltet nichts ab. `build/`, `dist/`,
+`vendor/`, `examples/` usw. zählen nie als Testcode. **Nie ausgeschlossen**, auch in echtem
+Testcode: Schweregrad `critical` und die Kategorien `secret`, `malware`, `malicious-package`
+und `unscannable`. Restrisiko: wer gezielt `import pytest` in eine Datei unter `tests/`
+schreibt, bekommt high/medium-Funde dort als Testcode gewertet – der Fund bleibt sichtbar.
 
 ## Exit-Codes der Tools
 
@@ -490,13 +528,16 @@ Kategorie `unscannable` (nie aus dem Score ausgeschlossen):
 
 | `rule_id` | `tool` | Wann |
 |---|---|---|
-| `nested-archive` | `unified-scan` | Archiv im Archiv (`.zip`, `.7z`, `.tar`, `.gz`, `.rar`, `.jar`, `.apk` …), erkannt an Endung **und** Magic Bytes (also auch umbenannt). Nur trufflehog schaut hinein, alle anderen Tools nicht. Office-/ODF-Dokumente zählen nicht dazu. |
+| `nested-archive` | `unified-scan` | Archiv im Archiv (`.zip`, `.7z`, `.tar`, `.gz`, `.rar`, `.jar`, `.apk` …), erkannt an Endung **und** Magic Bytes (also auch umbenannt). Nur trufflehog schaut hinein, alle anderen Tools nicht. Ausgenommen sind nur echte Office-/ODF-Dokumente: OOXML mit `[Content_Types].xml` **und** Hauptteil (`word/document.xml`, `xl/workbook.xml`, `ppt/presentation.xml` …), ODF mit `mimetype` als erstem Eintrag **und** `content.xml` – und ohne Skripte/Programme/Archive darin. Eine ZIP mit einer Dummy-`[Content_Types].xml` zählt als Archiv. |
 | `unscannable.manifest` | `guarddog` | `package.json` ist kein gültiges JSON, oder guarddog scheitert an einer Abhängigkeitsliste (`requirements*.txt`, `package.json`), während ein Kontrolllauf mit einer bekannten, harmlosen Liste (`six` / `left-pad`) klappt. |
 | `unscannable.office-file` | `olevba` | olevba kann eine Office-Datei nicht analysieren (Absturz, verschlüsselt, Timeout, keine Ausgabe). |
 
 Scheitert auch der Kontrolllauf, liegt es an Netzwerk/Proxy/Registry, also
-an der Infrastruktur: das landet nur unter `tools.guarddog.ecosystem_errors`
-(Hinweis "teilweise nicht geprüft", blockiert nicht). Entschieden wird über
+an der Infrastruktur: das landet unter `tools.guarddog.ecosystem_errors` und
+`tools.guarddog.infra_errors` (nicht in `core_failed_tools`). Eine
+Zeitüberschreitung (`UNIFIED_SCAN_GUARDDOG_TIMEOUT`, Standard 240 s pro
+Ökosystem, weit unter dem 600-s-Gesamtlimit) steht in `tools.guarddog.timed_out`
+und zählt als Kern-Tool-Ausfall. Entschieden wird über
 das Verhalten, nicht über den Fehlertext — der kann Inhalt der hochgeladenen
 Liste enthalten und wäre damit vom Uploader steuerbar. Das Malware-Gate schlägt nur bei echten
 Malware-Funden (Kategorie `malware`) fehl, nicht bei `unscannable`.
@@ -539,49 +580,67 @@ betrifft (`libc6`, `libc-bin` …) oder mehrere `FROM`-Zeilen dasselbe Image nut
 
 ## Malware-Gate im Detail
 
-`guarddog` prüft alle `requirements.txt`/`package.json`-Dateien im
-Projekt (rekursiv, egal wo im Verzeichnisbaum) gegen bekannte Muster für
-bösartige Pakete: Typosquatting (Name täuschend ähnlich zu einem
-populären Paket), verdächtige Install-Scripts, Obfuskierung im Code,
-Netzwerk-Exfiltration-Muster. Das ist unabhängig von bekannten CVEs
-(dafür ist bereits `trivy` zuständig) — hier geht es um Pakete, die von
-Grund auf bösartig sind, nicht um bekannte Schwachstellen in an sich
-legitimen Paketen.
+**guarddog** prüft alle `requirements.txt`/`package.json`-Dateien im Projekt (rekursiv) mit
+Heuristiken: verdächtige Install-Scripts, Obfuskierung, Netzwerk-Exfiltration, Typosquatting.
+Labels: `high_risk` → critical, Kategorie `malware` (Gate schlägt an, nie begründbar);
+`suspicious` → high, `suspicious-package` (begründbar; bei Top-5000-Paketen nur Hinweis);
+`low` → low. Unbekannte Labels (neue guarddog-Version) → high + `malware` (fail closed).
 
-Ergebnis-Labels von guarddog: `no_risks_detected`, `low`, `suspicious`,
-`high_risk`. Nur `high_risk` löst das Gate aus (severity `critical` in
-diesem Report); `low`/`suspicious` werden als normale Findings mit
-niedrigerer Severity in den Security-Report übernommen (Stufe 1 läuft
-trotzdem, ist keine Blockade).
+**OSV** (`tool: "osv"`) gleicht dieselben Abhängigkeiten deterministisch gegen die bekannten
+Schadpakete der OSV-Datenbank ab (MAL-*-Einträge des OpenSSF-Projekts malicious-packages,
+auch kompromittierte Versionen populärer Pakete). Der Index (`/opt/osv/mal_index.json`, einige
+MB) entsteht beim Image-Bau mit `build_osv_index.py` und wird bei jedem Neubau aktualisiert;
+zur Scan-Zeit geht nichts ins Netz. Versionen kommen aus `==`-Pins in `requirements*.txt`,
+aus `package-lock.json` oder aus exakten Versionen in `package.json`:
 
-Läuft weder `requirements.txt` noch `package.json` im Projekt (z.B. reines
-R/Shiny-Projekt ohne Python/JS-Dependencies), findet guarddog naturgemäß
-nichts — das Gate meldet 0 Findings und die Pipeline läuft normal weiter,
-das ist kein Fehler.
+| Treffer | Fund |
+|---|---|
+| alle Versionen bösartig, oder genau die festgelegte Version | `osv.malicious-package`, critical, `malware` |
+| nur einzelne Versionen bösartig, Version nicht festgelegt | `osv.malicious-versions`, high, `suspicious-package` |
+
+Fehlt der Index, steht das unter `tools.osv.error` (→ `core_failed_tools`).
+
+**Nicht festgelegte Versionen:** Ohne `==`-Pin bzw. Lockfile prüfen guarddog, OSV und trivy die
+jeweils aktuelle Version, nicht unbedingt die, die später installiert wird. Dafür gibt es pro
+Abhängigkeitsliste einen Hinweis `dependency-unpinned` (low) mit den betroffenen Paketen.
+
+Ohne `requirements.txt`/`package.json` (z.B. reines R-Projekt) finden beide naturgemäß nichts –
+kein Fehler.
 
 ## Office-Makro-Scan im Detail
 
 `olevba` scannt gezielt Dateien mit Office-Makro-fähiger Endung
 (`.doc`/`.dot`/`.docm`/`.dotm`, `.xls`/`.xlt`/`.xlsm`/`.xltm`/`.xlsb`/`.xlam`,
-`.ppt`/`.pot`/`.pps`/`.pptm`/`.potm`/`.ppsm`/`.ppam`) im Zielverzeichnis,
+`.ppt`/`.pot`/`.pps`/`.pptm`/`.potm`/`.ppsm`/`.ppam`) sowie VBA-Quelltexte im Zielverzeichnis,
 jede Datei einzeln. **Bewusst kein rekursiver `olevba -r` über den ganzen
 Ordner** — verifiziert, dass das JEDE Textdatei (auch `.py`, `.txt`) als
 Pseudo-Makro einliest und massives Rauschen erzeugt; die gezielte
 Dateisuche vermeidet das.
 
-Meldungen werden nach Schweregrad gruppiert:
-- **AutoExec** (`high`) — Makro läuft automatisch beim Öffnen der Datei.
-  In einem Dashboard/Report, der i.d.R. gar keine Makros braucht, schon
-  für sich ein Warnsignal.
-- **Suspicious**, gestaffelt nach Keyword:
-  - `critical` — Shell-Ausführung (`Shell`, `WScript.Shell`,
-    `ShellExecute`), PowerShell-Aufrufe, Remote-Download
-    (`URLDownloadToFileA`, `Net.WebClient`), Prozess-Injection
-    (`CreateThread`, `VirtualAlloc`, `WriteProcessMemory`).
-  - `high` — `CreateObject`/`GetObject` (OLE-Objekt-Erzeugung),
-    Obfuskierungs-Funktionen (`Chr`, `StrReverse`, `Xor`, `CallByName`).
-  - `medium` — alles andere (z.B. reiner Datei-Zugriff `Open`/`Write`,
-    Umgebungsvariablen-Zugriff) — für sich harmlos, aber meldenswert.
+Excel-VBA ist der Kernfall interner Tools – Shell-Aufrufe, `CreateObject`, XMLHTTP-Abfragen
+oder PowerShell stecken in sehr vielen legitimen Makros. Deshalb:
+
+- **AutoExec** (`high`) — Makro läuft automatisch (`Workbook_Open`, `AutoOpen`, `_Layout`,
+  `_Painted` …). Button-Handler (`*_Click`, `*_DblClick`) sind nur ein Hinweis (`low`).
+- **Suspicious**:
+  - `high` (begründbar) — Programme starten (`Shell`, `WScript.Shell`, `ShellExecute`,
+    PowerShell), Netzabfragen/Downloads (`MSXML2.XMLHTTP`, `URLDownloadToFileA`,
+    `Net.WebClient`), `CreateObject`/`GetObject`, Obfuskierungs-Funktionen (`Chr`,
+    `StrReverse`, `Xor`, `CallByName`)
+  - `critical` (nie begründbar) — Speicher-/Prozess-Manipulation (`VirtualAlloc`,
+    `WriteProcessMemory`, `CreateThread`, `RtlMoveMemory` …), Kategorie `malware`
+  - `medium` — alles andere (z.B. Datei-Zugriff) — für sich harmlos, aber meldenswert
+- **Dridex-Verschleierung** (`critical`, `malware`) — Signatur einer realen Malware-Familie.
+- **Kombination** `olevba.combo.autoexec_download_execute` (`critical`, `malware`): startet
+  automatisch **und** lädt eine Datei herunter bzw. speichert sie (`URLDownloadToFile`,
+  `Net.WebClient`, `ADODB.Stream`/`SaveToFile` …) **und** startet ein Programm (`Shell`,
+  `WScript.Shell`, PowerShell …) – im selben Makro-Projekt. Jedes Teil allein ist in
+  Business-Makros üblich, die Kette nicht. Eine reine XMLHTTP-Abfrage (REST lesen) zählt nicht
+  als Download.
+- Titel sind deutsch und nennen den Dateityp (Excel-Datei, Word-Dokument, VBA-Quelltext …).
+
+Neben Office-Dateien (auch nach Inhalt erkannt, siehe oben) prüft olevba VBA-/VBScript-
+Quelltexte: `.bas`, `.cls`, `.frm`, `.vba`, `.vbs`, `.vbe`.
 - **Hex/Base64-String-Erkennung** (`low`) — reiner Hinweis auf
   Obfuskierung, kein direkter Beweis für Bösartigkeit.
 - **IOC** (URLs/IPs/Pfade im dekompilierten Code) wird bewusst **nicht**
@@ -649,3 +708,30 @@ den Scanner. Übergreifende Fehlalarm-Muster, die daraus in die Policy kamen: Gu
 Top-Paketen, Checkov-Dockerfile-Hygiene, `*_exception`, olevba-Button-Handler und
 „Hex Strings“. Die verwundbaren Apps blockieren weiter (SQL-Injection, MD5-Passwörter, `yaml.load`,
 alte Pakete mit kritischen CVEs, Paket mit Netzwerkzugriff bei der Installation).
+
+Ergebnis mit dem Stand von PR #10 (Image `e8b87fda`):
+
+| Projekt | Funde roh | blockierende Zeilen | gesperrt |
+|---|---|---|---|
+| PowerShell-Sammlung | 0 | 0 | nein (PowerShell prüft kein Tool → `unscanned_files`) |
+| cowsay (Python) | 5 | 0 | nein |
+| tldr-python-client | 1 | 0 | nein |
+| quantstats (pandas-Report) | 6 | 0 | nein |
+| microblog (Flask) | 129 | 4 | ja, begründbar |
+| oletools (Makro-Beispiele) | 14 | 1 | ja, begründbar |
+| node-express-realworld | 73 | 5 | ja (hartcodierte Secrets) |
+| Vulnerable-Flask-App (Gegenprobe) | 1020 | 6 | ja |
+| dvpwa (Gegenprobe) | 109 | 3 | ja |
+
+## Tests
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install pytest py7zr oletools pyyaml
+.venv/bin/python -m pytest -q contrib/unified-scan/tests
+```
+
+`pyyaml` braucht `test_custom_rules.py` (liest die Regeldateien), `oletools`/`py7zr` die
+Makro- und Archiv-Tests. `test_corpus_real_bearer.py` läuft nur mit echtem bearer
+(`UNIFIED_SCAN_IMAGE_TEST=1`, im Image – `rebuild.sh` macht das), sonst wird er übersprungen.
+`test_policy_globs.py` prüft gegen die gespeicherte Regel-ID-Liste der gepinnten
+bearer-rules-Version oder, mit `BEARER_RULES_DIR=/opt/bearer-rules`, gegen die echten Regeln.

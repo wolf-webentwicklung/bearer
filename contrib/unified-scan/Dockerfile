@@ -44,7 +44,7 @@ RUN python -m venv /opt/venvs/checkov \
     && python -m venv /opt/venvs/oletools \
     && /opt/venvs/oletools/bin/pip install --no-cache-dir "oletools==${OLETOOLS_VERSION}" \
     && ln -s /opt/venvs/oletools/bin/olevba /usr/local/bin/olevba \
-    && pip install --no-cache-dir "py7zr==${PY7ZR_VERSION}"
+    && pip install --no-cache-dir "py7zr==${PY7ZR_VERSION}" "pytest==8.4.2"
 
 RUN set -eux; \
     for lang in go java javascript php python ruby; do \
@@ -55,9 +55,21 @@ RUN set -eux; \
     chmod -R a+rX /opt/bearer-rules; \
     test "$(find /opt/bearer-rules -name '*.yml' | wc -l)" -gt 100
 
+# Changed by rebuild.sh on every rebuild. Declared here, right before the data layers: any RUN
+# after an ARG whose value changed misses the cache, so the tool layers above stay cached while
+# trivy DB and OSV index are fetched fresh.
+ARG DATA_STAMP=initial
 ENV TRIVY_CACHE_DIR=/opt/trivy-cache
-RUN if [ "$TRIVY_BAKE_DB" = "1" ]; then trivy image --download-db-only --cache-dir /opt/trivy-cache; fi \
+RUN echo "data stamp ${DATA_STAMP}" \
+    && if [ "$TRIVY_BAKE_DB" = "1" ]; then trivy image --download-db-only --cache-dir /opt/trivy-cache; fi \
     && mkdir -p /opt/trivy-cache && chmod -R a+rX /opt/trivy-cache
+
+# Offline index of known malicious PyPI/npm packages (OSV MAL-* advisories, ~250 MB download,
+# a few MB kept). Refreshed on every rebuild; the scanner itself never talks to osv.dev.
+COPY build_osv_index.py /opt/unified-scan/build_osv_index.py
+RUN echo "data stamp ${DATA_STAMP}" \
+    && python /opt/unified-scan/build_osv_index.py /opt/osv/mal_index.json \
+    && chmod -R a+rX /opt/osv
 
 # Own rules for patterns the default rules miss (see custom-rules/). Same directory as the
 # default rules on purpose: bearer resolves `imports` (shared rules) only within one rule dir.
@@ -67,7 +79,9 @@ RUN chmod -R a+rX /opt/bearer-rules/idv
 RUN useradd --create-home --uid 10001 scanner
 WORKDIR /opt/unified-scan
 COPY unified_scan.py safe_extract.py http_wrapper.py entrypoint.sh severity_policy.json ./
-RUN chmod 0755 /opt/unified-scan/entrypoint.sh
+# Tests ship with the image for rebuild.sh's self-test (real bearer against the corpus).
+COPY tests/ ./tests/
+RUN chmod 0755 /opt/unified-scan/entrypoint.sh && chmod -R a+rX /opt/unified-scan
 
 # Read-only rootfs at runtime: everything the tools write (bearer/checkov caches, jobs) goes
 # to the /tmp tmpfs.
@@ -78,7 +92,9 @@ ENV HOME=/tmp \
     BEARER_EXTERNAL_RULE_DIR=/opt/bearer-rules \
     BEARER_DISABLE_DEFAULT_RULES=true \
     GUARDDOG_TOP_PACKAGES_CACHE_LOCATION=/tmp/guarddog-cache \
-    GUARDDOG_PARALLELISM=1 \
+    GUARDDOG_PARALLELISM=2 \
+    UNIFIED_SCAN_GUARDDOG_TIMEOUT=240 \
+    UNIFIED_SCAN_OSV_INDEX=/opt/osv/mal_index.json \
     BC_SKIP_MAPPING=TRUE \
     TRIVY_DISABLE_TELEMETRY=true \
     DO_NOT_TRACK=1 \

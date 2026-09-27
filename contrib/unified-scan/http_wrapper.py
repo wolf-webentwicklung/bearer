@@ -5,7 +5,9 @@ service, e.g. from a web form that accepts uploaded scripts.
   POST /scan   body = raw .zip/.7z archive, header X-Filename = original file name
                200 -> combined_report.json content (target = X-Filename), plus
                       "incomplete": bool and "failed_tools": [...] - tools that errored,
-                      timed out or only partly ran for this archive
+                      timed out or only partly ran for this archive; "core_failed_tools":
+                      the subset among bearer/trufflehog/guarddog/osv that failed for a
+                      reason other than registry/network trouble (consumer: block)
                422 -> {"error": "..."}  archive rejected (unsafe, invalid, too big, wrong type)
                5xx -> {"error": "..."}  scan failed / timed out - caller may retry
   GET /health  200 -> {"ok": true, "tools": {...}}
@@ -37,10 +39,25 @@ MAX_PARALLEL = int(os.environ.get("UNIFIED_SCAN_MAX_PARALLEL", "1"))
 WORKDIR = Path(os.environ.get("UNIFIED_SCAN_WORKDIR") or tempfile.gettempdir())
 JOB_PREFIX = "unified-scan-job-"
 ARCHIVE_SUFFIXES = (".zip", ".7z")
-TOOLS = ("guarddog", "bearer", "trufflehog", "trivy", "checkov", "git")
+TOOLS = ("guarddog", "bearer", "trufflehog", "trivy", "checkov", "olevba", "git")
+OSV_INDEX = Path(os.environ.get("UNIFIED_SCAN_OSV_INDEX") or "/opt/osv/mal_index.json")
 MAX_LINE = 10_000_000
 # Per-tool meta keys meaning "this tool did not (fully) run for this archive".
 _TOOL_FAILURE_KEYS = ("error", "image_errors", "ecosystem_errors")
+# Tools without which the result says nothing about the code/packages. When one of them failed
+# for this archive while the scanner itself is healthy, the consumer should block (the file
+# caused it) - listed separately as core_failed_tools. GuardDog failures that its control run
+# attributes to the registry/network (meta infra_errors) are infrastructure, not listed.
+CORE_TOOLS = ("bearer", "trufflehog", "guarddog", "osv")
+
+
+def _core_failed(name: str, meta: dict) -> bool:
+    if name not in CORE_TOOLS:
+        return False
+    if meta.get("error"):
+        return True
+    infra = set(meta.get("infra_errors") or [])
+    return any(eco not in infra for eco in (meta.get("ecosystem_errors") or {}))
 
 # Scans are memory hungry - queue them instead of running them all at once.
 _slots = threading.BoundedSemaphore(MAX_PARALLEL)
@@ -83,6 +100,7 @@ def annotate_report(report: dict, filename: str) -> dict:
                     if isinstance(meta, dict) and any(meta.get(k) for k in _TOOL_FAILURE_KEYS))
     report["failed_tools"] = failed
     report["incomplete"] = bool(failed)
+    report["core_failed_tools"] = sorted(name for name in failed if _core_failed(name, tools[name]))
     return report
 
 
@@ -141,7 +159,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            return self._json(200, {"ok": True, "tools": {t: bool(shutil.which(t)) for t in TOOLS}})
+            tools = {t: bool(shutil.which(t)) for t in TOOLS}
+            tools["osv_index"] = OSV_INDEX.is_file()
+            return self._json(200, {"ok": True, "tools": tools})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
